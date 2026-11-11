@@ -216,14 +216,16 @@ async fn main() -> Result<()> {
                 eprintln!();
                 println!("Transcribe model {version} is installed and active.");
             }
-            ModelAction::Status => match three_yiddish::model::current(&models) {
-                Some((version, path, vad)) => println!(
-                    "Transcribe model {version}\n  {}\n  VAD: {}",
-                    path.display(),
-                    vad.map_or("none".into(), |v| v.display().to_string())
-                ),
-                None => println!("No Transcribe model installed. Run: 3yiddish model pull"),
-            },
+            ModelAction::Status => {
+                match three_yiddish::model::current(&std::env::current_dir()?.join(&models)) {
+                    Some((version, path, vad)) => println!(
+                        "Transcribe model {version}\n  {}\n  VAD: {}",
+                        path.display(),
+                        vad.map_or("none".into(), |v| v.display().to_string())
+                    ),
+                    None => println!("No Transcribe model installed. Run: 3yiddish model pull"),
+                }
+            }
             ModelAction::Rollback => {
                 println!("Now using {}", three_yiddish::model::rollback(&models)?);
             }
