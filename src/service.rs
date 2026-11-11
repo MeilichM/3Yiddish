@@ -821,11 +821,9 @@ mod authorization_tests {
 
     #[tokio::test]
     async fn private_endpoints_require_token_but_health_is_public() {
-        let cfg = Config::load(std::path::Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/config.example.toml"
-        )))
-        .unwrap();
+        // The built-in defaults, exactly what a fresh install runs with.
+        let cfg =
+            Config::load_or_default(std::path::Path::new("/nonexistent/config.toml")).unwrap();
         let mut app = App::new(cfg).unwrap();
         app.token = Some("fixture-service-token-at-least-24-characters".into());
         let router = router(app);
@@ -868,6 +866,6 @@ mod authorization_tests {
         let body = authorized.into_body().collect().await.unwrap().to_bytes();
         let status: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(status["components"]["schmooze"]["status"], "placeholder");
-        assert_eq!(status["components"]["speak"]["status"], "placeholder");
+        assert_eq!(status["components"]["speak"]["status"], "not-configured");
     }
 }
