@@ -69,10 +69,11 @@ function renderList(items) {
 }
 function render(data) {
   const g = data.game || {}, r = g.result, rec = !!(data.recording || data.record_requested);
+  const lab = g.lab !== false;
   shown('setup', !armed); shown('game', armed && !listMode && !pgMode);
   shown('list', armed && listMode); shown('pg', armed && pgMode);
-  shown('list-open', armed && !listMode && !pgMode && !rec);
-  shown('pg-open', armed && !listMode && !pgMode && !rec && (g.playground || []).length > 0);
+  shown('list-open', armed && lab && !listMode && !pgMode && !rec);
+  shown('pg-open', armed && lab && !listMode && !pgMode && !rec && (g.playground || []).length > 0);
   if (listMode) renderList(g.readings || []);
   if (pgMode) renderPg(g.playground || []);
   document.body.dataset.recording = rec ? 'true' : 'false';
@@ -85,13 +86,20 @@ function render(data) {
     $('read').textContent = r.line || ''; $('heard').textContent = r.heard || '';
     $('missed').textContent = (r.missed || []).length ? '✗ ' + r.missed.join('  ') : '';
   }
-  $('line').textContent = g.line || 'No unread lines left.';
-  $('next-title').textContent = rec ? '● Recording: read this' : g.listening ? '👂 Listening back…' : 'Next';
+  if (lab) {
+    $('line').textContent = g.line || 'No unread lines left.';
+    $('next-title').textContent = rec ? '● Recording: read this' : g.listening ? '👂 Listening back…' : 'Next';
+  } else {
+    // Plain mode: Record, then the text appears. No game, readings or test tools.
+    $('headline').textContent = ''; shown('result', false);
+    $('line').textContent = g.transcript || 'Tap Record and speak Yiddish.';
+    $('next-title').textContent = rec ? '● Recording…' : g.busy ? 'Listening back…' : '3Yiddish heard';
+  }
   $('record').textContent = rec ? '■ Stop' : '● Record';
   $('record').disabled = !!g.listening && !rec;
   // Locked until the score is back, so Back cannot skip past the reading being transcribed.
   $('skip').disabled = rec || !!g.listening; $('back').disabled = rec || !!g.listening;
-  shown('back', !!g.back && !rec); shown('skip', !rec); shown('restart', rec);
+  shown('back', lab && !!g.back && !rec); shown('skip', lab && !rec); shown('restart', rec);
 }
 function status(text, message) {
   $('connection').textContent = text;

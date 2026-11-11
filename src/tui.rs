@@ -93,6 +93,9 @@ struct Screen {
     read_list: bool,
     read_pick: usize,
     read_items: Vec<Value>,
+    /// Benchmark tools (read-aloud game, readings, playground) exist only where the line
+    /// pool does: the owner's machine. Everyone else gets plain Record → text.
+    lab: bool,
     /// Playground review: on/off, items (state/playground/playground.json, unsure first),
     /// the shown item, and the speaker's decisions by reading number.
     pg_mode: bool,
@@ -385,7 +388,7 @@ fn select_tab(state: &mut Screen, tab: usize) {
         state.drafts[tab].clone()
     };
     state.scroll = 0;
-    if tab == 1 && state.read_line.is_none() {
+    if tab == 1 && state.lab && state.read_line.is_none() {
         next_line(state);
     }
 }
@@ -1535,7 +1538,7 @@ fn draw(frame: &mut Frame, state: &Screen, watches: &[(String, PathBuf)]) -> Vec
         if body.trim().is_empty() {
             let caption = match state.tab {
                 0 => "Type a message or record.",
-                1 => "Record audio or paste a file path.",
+                1 => "Press ● Record and speak Yiddish.",
                 2 => "Type Yiddish, then Speak.",
                 5 => "Compare local models.",
                 _ => "",
@@ -1556,11 +1559,13 @@ fn draw(frame: &mut Frame, state: &Screen, watches: &[(String, PathBuf)]) -> Vec
         } else {
             frame.render_widget(
                 Paragraph::new(visual(&clean(&body), body_area.width as usize))
-                    .alignment(if state.tab == 1 && state.read_line.is_some() {
-                        Alignment::Right
-                    } else {
-                        Alignment::Left
-                    })
+                    .alignment(
+                        if state.tab == 1 && (state.read_line.is_some() || right_to_left(&body)) {
+                            Alignment::Right
+                        } else {
+                            Alignment::Left
+                        },
+                    )
                     .style(Style::default().fg(FOREGROUND))
                     .scroll((state.scroll, 0)),
                 body_area,
@@ -2337,6 +2342,17 @@ fn next_line(state: &mut Screen) {
 }
 fn submit_reading(state: &mut Screen, actions: &mpsc::UnboundedSender<Action>) -> Result<()> {
     let Some(line) = state.read_pending.clone() else {
+        // Plain transcription: no game line attached.
+        actions.send(Action {
+            tab: 1,
+            input: std::mem::take(&mut state.input),
+            history: vec![],
+            aliases: vec![],
+            pair_id: None,
+            audio_path: None,
+        })?;
+        state.busy = true;
+        state.outputs[1] = "Listening back…".into();
         return Ok(());
     };
     actions.send(Action {
@@ -2444,6 +2460,13 @@ fn listening(state: &Screen) -> bool {
 fn game_view(state: &Screen) -> Value {
     let listening = listening(state);
     json!({
+        "lab": state.lab,
+        // Plain mode: the phone shows the last transcript instead of a game line.
+        "transcript": if state.lab { "" } else { state.outputs[1].as_str() },
+        "busy": state.busy
+            || state.phone_command_busy
+            || state.phone_status.as_ref().is_some_and(|p| p["busy"] == true),
+
         "line": state.read_line,
         "result": state.read_result,
         "recording": recording(state),
@@ -2625,6 +2648,7 @@ fn terminal(
             resume.apply(&mut state);
         }
     }
+    state.lab = Path::new(READ_POOL).is_file();
     refresh_readings(&mut state, READ_LOG);
     load_playground(&mut state);
     // Back can reach readings from earlier sessions: seed history from the log.
@@ -2636,7 +2660,7 @@ fn terminal(
             .collect();
         state.read_history = lines.split_off(lines.len().saturating_sub(100));
     }
-    if state.tab == 1 && state.read_line.is_none() {
+    if state.tab == 1 && state.lab && state.read_line.is_none() {
         next_line(&mut state);
     }
     if state.pair.is_some() {
@@ -3988,6 +4012,17 @@ mod tests {
                 && screen.contains("judge unsure")
         );
         state.pg_mode = false;
+        // Plain mode (no game line): a recording is still sent to be transcribed.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut plain = Screen::default();
+        plain.input = "state/recordings/x.wav".into();
+        submit_reading(&mut plain, &tx).unwrap();
+        let sent = rx.try_recv().unwrap();
+        assert_eq!(
+            (sent.tab, sent.input.as_str()),
+            (1, "state/recordings/x.wav")
+        );
+        assert!(sent.history.is_empty() && plain.busy);
         let (_, cer) = errors("גוט מארגן", "גוט מארגן").unwrap();
         assert_eq!(
             errors("כ'בין זעהענדיג יאהרן", "איך בין זעענדיג יארן").unwrap(),
