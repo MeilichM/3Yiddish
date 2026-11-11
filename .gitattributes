@@ -1,0 +1,10 @@
+# Language stats: count the Rust application only.
+vendor/** linguist-vendored
+*.c linguist-vendored
+*.cc linguist-vendored
+*.cpp linguist-vendored
+*.h linguist-vendored
+*.hpp linguist-vendored
+*.py linguist-vendored
+*.cjs linguist-vendored
+assets/** linguist-vendored

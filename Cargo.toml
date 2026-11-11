@@ -1,0 +1,53 @@
+[package]
+name = "three-yiddish"
+default-run = "3yiddish"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "CC-BY-NC-SA-4.0"
+description = "3Yiddish: modular local language, transcription and speech middleware"
+
+[[bin]]
+name = "3yiddish"
+path = "src/main.rs"
+
+[dependencies]
+qrcode = { version = "0.14", default-features = false }
+ratatui = "0.30"
+crossterm = "0.29"
+unicode-bidi = "0.3"
+textwrap = "0.16"
+anyhow = "1"
+axum = { version = "0.8", features = ["multipart"] }
+clap = { version = "4", features = ["derive", "env"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "blocking"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+toml = "0.9"
+unicode-normalization = "0.1"
+uuid = { version = "1", features = ["v4"] }
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+sha2 = "0.10"
+directories = "6"
+whisper-rs = "0.16"
+hound = "3.5"
+symphonia = { version = "0.6", features = ["all"] }
+rodio = { version = "0.23", default-features = false, features = ["playback", "recording"] }
+self-replace = "1.5"
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+strip = true
+lto = "thin"
+
+
+
+
+# Macs get the Apple GPU (Metal) for speech; other platforms use the CPU for now.
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.16", features = ["metal"] }

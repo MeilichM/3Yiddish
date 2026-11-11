@@ -1,0 +1,112 @@
+# Promote a Transcribe candidate from Hugging Face to the single public "latest" model.
+# The candidate must beat the current model on the private playground test (encrypted in
+# bench/, key in the BENCH_AGE_KEY secret). Logs show totals only.
+name: Promote model
+on:
+  workflow_dispatch:
+    inputs:
+      hf_repo:
+        description: Hugging Face repo holding the candidate LoRA
+        default: TripleU613/3Yiddish-Transcribe
+      hf_revision:
+        description: Branch or commit of the candidate
+        required: true
+      version:
+        description: Version name for the new model (e.g. 2026.11.12)
+        required: true
+      force:
+        description: Publish even if it does not beat the current model (first release)
+        type: boolean
+        default: false
+permissions:
+  contents: write
+concurrency: promote-model
+jobs:
+  promote:
+    runs-on: ubuntu-22.04
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+      BASE: ivrit-ai/yi-whisper-large-v3-turbo
+      BASE_REV: 7d0fc3e4789a4d2cd412f109113ab1f4b8c47d5e
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq libasound2-dev cmake clang age
+      - run: rustup toolchain install 1.98.0 --profile minimal && rustup default 1.98.0
+      - run: GGML_NATIVE=OFF GGML_AVX=ON GGML_AVX2=ON GGML_FMA=ON GGML_F16C=ON cargo build --release --locked --bin 3yiddish
+      - name: Merge the candidate and convert it to whisper.cpp (q5_k)
+        run: |
+          python3 -m venv venv
+          venv/bin/pip install -q --extra-index-url https://download.pytorch.org/whl/cpu torch "transformers==4.57.*" peft huggingface_hub
+          venv/bin/python - <<'EOF'
+          import os, torch
+          from huggingface_hub import snapshot_download
+          from transformers import WhisperForConditionalGeneration, WhisperProcessor
+          from peft import PeftModel
+          lora = snapshot_download(os.environ["HF_REPO"], revision=os.environ["HF_REV"], token=os.environ["HF_TOKEN"],
+                                   allow_patterns=["adapter_config.json", "adapter_model.safetensors"])
+          m = WhisperForConditionalGeneration.from_pretrained(os.environ["BASE"], revision=os.environ["BASE_REV"], torch_dtype=torch.float32)
+          m = PeftModel.from_pretrained(m, lora).merge_and_unload()
+          m.save_pretrained("hf", safe_serialization=False)
+          WhisperProcessor.from_pretrained(os.environ["BASE"], revision=os.environ["BASE_REV"]).save_pretrained("hf")
+          EOF
+          git clone -q --depth 1 https://github.com/ggml-org/whisper.cpp
+          git clone -q --depth 1 https://github.com/openai/whisper
+          cmake -S whisper.cpp -B whisper.cpp/build -DCMAKE_BUILD_TYPE=Release >/dev/null
+          cmake --build whisper.cpp/build -j4 --target whisper-quantize >/dev/null
+          venv/bin/python whisper.cpp/models/convert-h5-to-ggml.py hf whisper .
+          whisper.cpp/build/bin/whisper-quantize ggml-model.bin candidate.bin q5_k
+          bash whisper.cpp/models/download-vad-model.sh silero-v5.1.2 .
+          mv ggml-silero-*.bin vad.bin
+        env:
+          HF_REPO: ${{ inputs.hf_repo }}
+          HF_REV: ${{ inputs.hf_revision }}
+      - name: Unlock the private test set
+        run: |
+          printf '%s\n' "${{ secrets.BENCH_AGE_KEY }}" > key.txt
+          age -d -i key.txt bench/playground.tar.age | tar -x
+          rm key.txt
+      - name: Score candidate and current model (totals only)
+        run: |
+          ./target/release/3yiddish bench bench/gold.json bench/audio --model candidate.bin --vad vad.bin --summary | tee candidate.json
+          if gh release view model-latest >/dev/null 2>&1; then
+            gh release download model-latest -p model.json -D current
+            name=$(python3 -c "import json;print([f['name'] for f in json.load(open('current/model.json'))['files'] if f['role']=='transcribe'][0])")
+            gh release download model-latest -p "$name" -D current
+            ./target/release/3yiddish bench bench/gold.json bench/audio --model "current/$name" --vad vad.bin --summary | tee current.json
+          else
+            echo '{"score": 0}' > current.json
+          fi
+          python3 - <<'EOF'
+          import json, os, sys
+          new, old = json.load(open("candidate.json"))["score"], json.load(open("current.json"))["score"]
+          print(f"candidate {new} vs current {old}")
+          if new <= old and os.environ["FORCE"] != "true":
+              sys.exit("Candidate does not beat the current model; nothing published.")
+          EOF
+        env:
+          FORCE: ${{ inputs.force }}
+      - name: Publish as the only model on the model-latest release
+        run: |
+          v="${{ inputs.version }}"
+          mv candidate.bin "transcribe-$v.bin"
+          python3 - "$v" <<'EOF'
+          import hashlib, json, os, sys
+          v = sys.argv[1]
+          def entry(role, name):
+              h = hashlib.sha256(open(name, "rb").read()).hexdigest()
+              return {"role": role, "name": name, "size": os.path.getsize(name), "sha256": h}
+          score = json.load(open("candidate.json"))["score"]
+          json.dump({"version": v, "files": [entry("transcribe", f"transcribe-{v}.bin"), entry("vad", "vad.bin")],
+                     "scores": {"playground": score}}, open("model.json", "w"), indent=1)
+          EOF
+          gh release view model-latest >/dev/null 2>&1 || gh release create model-latest --title "Transcribe model (latest)" --notes "The current Transcribe model. 3Yiddish downloads it automatically." --latest=false
+          old=$(gh release view model-latest --json assets -q '.assets[].name' | grep '^transcribe-' || true)
+          gh release upload model-latest "transcribe-$v.bin" vad.bin --clobber
+          gh release upload model-latest model.json --clobber
+          for a in $old; do [ "$a" = "transcribe-$v.bin" ] || gh release delete-asset model-latest "$a" -y; done
+          cp model.json models/latest.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add models/latest.json
+          git commit -m "Promote Transcribe model $v" && git push

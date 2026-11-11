@@ -1,0 +1,10 @@
+3Yiddish
+Copyright (c) 2026 TripleU613. Licensed under CC BY-NC-SA 4.0 (see LICENSE).
+
+The Transcribe model is a fine-tune of third-party models whose licenses
+require these notices to accompany it:
+
+- OpenAI Whisper large-v3-turbo, MIT License, Copyright (c) 2022 OpenAI.
+  See licenses/whisper-MIT.txt.
+- ivrit-ai/yi-whisper-large-v3-turbo, Apache License 2.0, by ivrit.ai.
+  See licenses/ivrit-ai-Apache-2.0.txt.

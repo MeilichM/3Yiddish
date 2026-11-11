@@ -1,0 +1,59 @@
+# Tag vX.Y.Z → one raw binary per platform + SHA256SUMS + installers on a GitHub release.
+# `3yiddish update` and the installers read exactly these asset names.
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-15, target: aarch64-apple-darwin }
+          - { os: macos-15-intel, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, ext: .exe }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libasound2-dev cmake clang
+      - run: rustup toolchain install 1.98.0 --profile minimal && rustup default 1.98.0
+      - name: Version matches tag
+        shell: bash
+        run: test "v$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" = "${GITHUB_REF_NAME}"
+      - name: Build
+        shell: bash
+        run: |
+          # Released x86 binaries target a safe baseline (AVX2, about 2013 on) instead of the
+          # build machine's own CPU, which could crash older processors.
+          if [[ "${{ matrix.target }}" == x86_64-* ]]; then
+            export GGML_NATIVE=OFF GGML_AVX=ON GGML_AVX2=ON GGML_FMA=ON GGML_F16C=ON
+          else
+            export GGML_NATIVE=OFF
+          fi
+          cargo build --release --locked --bin 3yiddish
+      - shell: bash
+        run: mkdir -p dist && cp target/release/3yiddish${{ matrix.ext }} dist/3yiddish-${{ matrix.target }}${{ matrix.ext }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: dist/*
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: cp install/install.sh install/install.ps1 dist/
+      - run: cd dist && sha256sum * > SHA256SUMS
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "3Yiddish $GITHUB_REF_NAME" --generate-notes --latest

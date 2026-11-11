@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#0f141b"><title>3Yiddish</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body><main>
+<header><span class="brand">3Yiddish</span><span id="connection" role="status">Connecting…</span><button id="pg-open" class="small" hidden>🧪 Test</button><button id="list-open" class="small" hidden>📋 Readings</button></header>
+<section id="setup"><p id="message">Keep this page open.</p><button id="enable" class="hero" hidden>Start</button><button id="play" hidden>Enable playback</button></section>
+<section id="game" hidden>
+  <p id="progress"></p>
+  <p id="headline"></p>
+  <div id="result" hidden>
+    <div class="card"><small>You read</small><p id="read" dir="rtl" lang="yi"></p></div>
+    <div class="card"><small>3Yiddish heard</small><p id="heard" dir="rtl" lang="yi"></p><p id="missed" dir="rtl" lang="yi"></p></div>
+  </div>
+  <div id="next" class="card next"><small id="next-title">Next</small><p id="line" dir="rtl" lang="yi"></p></div>
+  <nav><button id="back" hidden>◀ Back</button><button id="record" class="hero">● Record</button><button id="skip">Skip</button><button id="restart" hidden>↺ Restart</button></nav>
+</section>
+<section id="list" hidden>
+  <div class="bar"><button id="list-close" class="small">◀ Game</button><span id="list-title"></span></div>
+  <div id="items"></div>
+</section>
+<section id="pg" hidden>
+  <div class="bar"><button id="pg-close" class="small">◀ Game</button><span id="pg-title"></span></div>
+  <p class="hint">Play it, then tap the version that is what you actually said.</p>
+  <div id="pg-cards"></div>
+  <nav><button id="pg-prev">◀</button><button id="pg-play" class="hero">▶ Play</button><button id="pg-toss">✗ Toss</button><button id="pg-next">▶</button></nav>
+</section>
+<audio id="player" playsinline></audio>
+</main></body></html>

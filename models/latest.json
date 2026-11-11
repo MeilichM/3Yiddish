@@ -1,0 +1,21 @@
+{
+ "version": "2026.11.11",
+ "files": [
+  {
+   "role": "transcribe",
+   "name": "transcribe-2026.11.11.bin",
+   "size": 574041195,
+   "sha256": "5da64e8963b955a3b0c88eb0638a5cce8112b3edd6d6cd7f8a6c208a2d42c03e"
+  },
+  {
+   "role": "vad",
+   "name": "vad.bin",
+   "size": 885098,
+   "sha256": "29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf"
+  }
+ ],
+ "scores": {
+  "playground": 94.7
+ },
+ "format": "ggml-q5_k"
+}
