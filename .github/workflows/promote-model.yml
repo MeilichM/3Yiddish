@@ -30,7 +30,7 @@ jobs:
       BASE: ivrit-ai/yi-whisper-large-v3-turbo
       BASE_REV: 7d0fc3e4789a4d2cd412f109113ab1f4b8c47d5e
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq libasound2-dev cmake clang age
       - run: rustup toolchain install 1.98.0 --profile minimal && rustup default 1.98.0
       - run: GGML_NATIVE=OFF GGML_AVX=ON GGML_AVX2=ON GGML_FMA=ON GGML_F16C=ON cargo build --release --locked --bin 3yiddish

@@ -19,7 +19,7 @@ jobs:
           - { os: windows-latest, target: x86_64-pc-windows-msvc, ext: .exe }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libasound2-dev cmake clang
       - run: rustup toolchain install 1.98.0 --profile minimal && rustup default 1.98.0
@@ -47,7 +47,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           path: dist
