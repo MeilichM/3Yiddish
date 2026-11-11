@@ -27,7 +27,7 @@ tokio = { version = "1", features = ["full"] }
 toml = "0.9"
 unicode-normalization = "0.1"
 uuid = { version = "1", features = ["v4"] }
-axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+axum-server = { version = "0.9", default-features = false, features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 sha2 = "0.10"
 directories = "6"
