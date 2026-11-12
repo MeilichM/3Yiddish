@@ -37,12 +37,9 @@ Got a file instead?
 **Type Yiddish anywhere (push-to-talk).** Run `3yiddish dictate`, then hold **F9** in any app
 (email, WhatsApp, Word, a forum), speak, and let go: the Yiddish is typed right where your cursor
 is. Pick another key with `3yiddish dictate --key CapsLock`. On Linux, add a keyboard shortcut in
-your desktop settings; `3yiddish dictate` prints the exact line to paste. No microphone on the
-PC? Pair your phone and it becomes the mic.
+your desktop settings; `3yiddish dictate` prints the exact line to paste.
 
-Fancy bonus stuff:
-- **Phone as a mic.** Pair your phone from the **Phone** tab and talk into that.
-- **Read-aloud game.** Read lines out loud, get a score, and help the model get smarter.
+One more thing:
 - **Local API.** `3yiddish serve`, then point any OpenAI-style transcription tool at
   `http://127.0.0.1:8793`. If that sentence meant nothing to you, ignore it.
 

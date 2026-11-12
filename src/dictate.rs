@@ -112,6 +112,8 @@ fn press(state: &Shared) {
     }
     match crate::audio::Recorder::start() {
         Ok(r) => s.recorder = Some(Take::Pc(r)),
+        // Developer machines only (no PC mic there): the paired phone stands in.
+        Err(pc) if !std::path::Path::new("state/read-aloud.txt").is_file() => eprintln!("{pc}"),
         Err(pc) => match phone_start(&s.server) {
             Ok(take) => s.recorder = Some(take),
             Err(phone) => eprintln!("{pc}\n(Phone: {phone})"),

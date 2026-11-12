@@ -30,11 +30,20 @@ const TABS: [&str; 7] = [
 /// Tabs kept in code but hidden from the bar and keyboard cycling. Schmooze and Speak are
 /// paused; Models and Benchmark only served them.
 const PAUSED_TABS: [usize; 4] = [0, 2, 4, 5];
+/// Developer (benchmark) machines have the read-aloud pool. Everyone else gets the plain app:
+/// Transcribe with the PC microphone only; no Progress tab, no phone pairing.
+static LAB: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+fn lab() -> bool {
+    LAB.load(std::sync::atomic::Ordering::Relaxed)
+}
+fn hidden(tab: usize) -> bool {
+    PAUSED_TABS.contains(&tab) || (!lab() && matches!(tab, 3 | 6))
+}
 fn next_tab(from: usize, step: usize) -> usize {
     let mut tab = from;
     loop {
         tab = (tab + step) % TABS.len();
-        if !PAUSED_TABS.contains(&tab) {
+        if !hidden(tab) {
             return tab;
         }
     }
@@ -194,7 +203,7 @@ impl Resume {
         s.phone_audio = self.phone_audio;
         s.drafts = self.drafts;
         s.tab = self.tab.min(TABS.len() - 1);
-        if PAUSED_TABS.contains(&s.tab) {
+        if hidden(s.tab) {
             s.tab = next_tab(s.tab, 1);
         }
         s.input = self.input;
@@ -1363,7 +1372,7 @@ fn draw(frame: &mut Frame, state: &Screen, watches: &[(String, PathBuf)]) -> Vec
     let tabs = TABS
         .iter()
         .enumerate()
-        .filter(|(i, _)| !PAUSED_TABS.contains(i))
+        .filter(|(i, _)| !hidden(*i))
         .map(|(i, label)| (*label, Click::Tab(i), true))
         .collect::<Vec<_>>();
     let tab_rects = flow(bounds.width, tabs.iter().map(|(label, _, _)| label.len()));
@@ -2629,8 +2638,12 @@ fn terminal(
             });
         let _ = tx.send(Update::Available(app, model));
     });
+    LAB.store(
+        Path::new(READ_POOL).is_file(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let mut state = Screen::default();
-    if PAUSED_TABS.contains(&state.tab) {
+    if hidden(state.tab) {
         state.tab = next_tab(state.tab, 1);
     }
     state.review_available = Path::new("state/training-review.jsonl").is_file();
@@ -2648,7 +2661,13 @@ fn terminal(
             resume.apply(&mut state);
         }
     }
-    state.lab = Path::new(READ_POOL).is_file();
+    state.lab = lab();
+    if hidden(state.tab) {
+        state.tab = next_tab(state.tab, 1);
+    }
+    if !state.lab {
+        state.pair = None;
+    }
     refresh_readings(&mut state, READ_LOG);
     load_playground(&mut state);
     // Back can reach readings from earlier sessions: seed history from the log.
@@ -3635,7 +3654,7 @@ mod tests {
                         );
                     }
                 }
-                for tab in (0..TABS.len()).filter(|t| !PAUSED_TABS.contains(t)) {
+                for tab in (0..TABS.len()).filter(|t| !hidden(*t)) {
                     assert!(hits.iter().any(|hit| hit.action == Click::Tab(tab)));
                 }
                 for (index, hit) in hits.iter().enumerate() {
@@ -3729,6 +3748,7 @@ mod tests {
     }
     #[test]
     fn refresh_preserves_workspace_and_pairing_in_private_handoff() {
+        LAB.store(true, std::sync::atomic::Ordering::Relaxed); // developer layout
         let mut state = Screen::default();
         state.tab = 6;
         state.input = "א גוטן".into();
@@ -3794,6 +3814,7 @@ mod tests {
     }
     #[test]
     fn mouse_targets_match_visible_controls_and_disabled_buttons_do_not_fire() {
+        LAB.store(true, std::sync::atomic::Ordering::Relaxed); // developer layout
         for (width, height) in [(80, 24), (120, 40)] {
             let mut term =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();

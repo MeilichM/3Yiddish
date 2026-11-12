@@ -164,7 +164,9 @@ fn open_input(samples: Arc<std::sync::Mutex<Vec<f32>>>) -> Result<(rodio::cpal::
         .default_input_device()
         .filter(|d| !monitor(d))
         .or_else(|| host.input_devices().ok()?.find(|d| !monitor(d)))
-        .context("No microphone on this PC. Pair your phone and use it as the microphone.")?;
+        .context(
+            "No microphone found. Plug one in (or check your sound settings) and try again.",
+        )?;
     let config = device
         .default_input_config()
         .context("The microphone has no usable settings")?;
