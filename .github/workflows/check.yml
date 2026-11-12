@@ -88,5 +88,12 @@ jobs:
       - name: Clippy for Android (Termux)
         run: |
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" GGML_NATIVE=OFF GGML_OPENMP=OFF
+          # Phones have no libc++_shared.so: point that name at the static C++ library, so the
+          # file carries it inside and needs only Android's own system libraries.
+          mkdir -p "$RUNNER_TEMP/cxx" && echo 'INPUT(-lc++_static -lc++abi)' > "$RUNNER_TEMP/cxx/libc++_shared.so"
+          export RUSTFLAGS="-L native=$RUNNER_TEMP/cxx"
           cargo ndk -t arm64-v8a -P 24 clippy --locked --bin 3yiddish -- -D warnings
           cargo ndk -t arm64-v8a -P 24 build --release --locked --bin 3yiddish
+          if readelf -d target/aarch64-linux-android/release/3yiddish | grep -E 'NEEDED' | grep -v -E 'lib(c|m|dl|log)\.so'; then
+            echo "The Android build needs a library phones do not have." >&2; exit 1
+          fi
