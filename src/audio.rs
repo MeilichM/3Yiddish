@@ -174,29 +174,41 @@ fn open_input(samples: Arc<std::sync::Mutex<Vec<f32>>>) -> Result<(rodio::cpal::
             s.extend(data);
         }
     };
-    let err = |e| eprintln!("Microphone error: {e}");
+    use rodio::cpal::SampleFormat as F;
+    let cfg = config.config();
     let stream = match config.sample_format() {
-        rodio::cpal::SampleFormat::F32 => device.build_input_stream(
-            config.config(),
-            move |d: &[f32], _| push(&mut d.iter().copied()),
-            err,
-            None,
-        ),
-        rodio::cpal::SampleFormat::I16 => device.build_input_stream(
-            config.config(),
-            move |d: &[i16], _| push(&mut d.iter().map(|s| *s as f32 / 32768.0)),
-            err,
-            None,
-        ),
-        rodio::cpal::SampleFormat::U16 => device.build_input_stream(
-            config.config(),
-            move |d: &[u16], _| push(&mut d.iter().map(|s| (*s as f32 - 32768.0) / 32768.0)),
-            err,
-            None,
-        ),
+        F::F32 => build::<f32>(&device, &cfg, push),
+        F::F64 => build::<f64>(&device, &cfg, push),
+        F::I8 => build::<i8>(&device, &cfg, push),
+        F::I16 => build::<i16>(&device, &cfg, push),
+        F::I32 => build::<i32>(&device, &cfg, push),
+        F::I64 => build::<i64>(&device, &cfg, push),
+        F::U8 => build::<u8>(&device, &cfg, push),
+        F::U16 => build::<u16>(&device, &cfg, push),
+        F::U32 => build::<u32>(&device, &cfg, push),
+        F::U64 => build::<u64>(&device, &cfg, push),
         other => bail!("Unsupported microphone format {other:?}"),
     }
     .with_context(|| format!("Cannot open the microphone {}", name(&device)))?;
     stream.play()?;
     Ok((stream, rate, channels))
+}
+
+/// Open an input stream for any sample type, converting every sample to f32.
+fn build<T>(
+    device: &rodio::cpal::Device,
+    config: &rodio::cpal::StreamConfig,
+    push: impl Fn(&mut dyn Iterator<Item = f32>) + Send + 'static,
+) -> Result<rodio::cpal::Stream>
+where
+    T: rodio::cpal::SizedSample,
+    f32: rodio::cpal::FromSample<T>,
+{
+    use rodio::cpal::traits::DeviceTrait;
+    Ok(device.build_input_stream(
+        *config,
+        move |d: &[T], _| push(&mut d.iter().map(|s| s.to_sample::<f32>())),
+        |e| eprintln!("Microphone error: {e}"),
+        None,
+    )?)
 }

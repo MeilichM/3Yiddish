@@ -1,7 +1,7 @@
 [package]
 name = "three-yiddish"
 default-run = "3yiddish"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 publish = false
 license = "CC-BY-NC-SA-4.0"
