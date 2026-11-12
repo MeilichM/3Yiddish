@@ -1,6 +1,7 @@
 pub mod asr;
 pub mod audio;
 pub mod config;
+pub mod dictate;
 pub mod eval;
 pub mod knowledge;
 pub mod model;

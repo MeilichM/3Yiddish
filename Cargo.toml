@@ -1,7 +1,7 @@
 [package]
 name = "three-yiddish"
 default-run = "3yiddish"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 publish = false
 license = "CC-BY-NC-SA-4.0"
@@ -36,6 +36,8 @@ hound = "3.5"
 symphonia = { version = "0.6", features = ["all"] }
 rodio = { version = "0.23", default-features = false, features = ["playback", "recording"] }
 self-replace = "1.5"
+enigo = "0.6"
+arboard = "3"
 
 [dev-dependencies]
 http-body-util = "0.1"
@@ -51,3 +53,13 @@ lto = "thin"
 # Macs get the Apple GPU (Metal) for speech; other platforms use the CPU for now.
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { version = "0.16", features = ["metal"] }
+
+# Linux mic through PulseAudio/PipeWire (pure-Rust protocol client): ALSA's "default"
+# capture device is often unavailable on PipeWire desktops.
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { version = "0.18", features = ["pulseaudio"] }
+
+# Global hold-to-talk key on Windows/macOS. Linux binds keys in the desktop instead, so the
+# Linux binary does not need X11 libraries at runtime.
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+rdev = "0.5"

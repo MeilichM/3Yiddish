@@ -1,5 +1,5 @@
 //! Cross-platform PC microphone and speaker (rodio/cpal): no ffmpeg or ffplay needed.
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use std::{
     path::Path,
     sync::{
@@ -19,46 +19,37 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// Start recording from the default microphone. Errors (no mic, no permission) come back
-    /// here, not at stop.
+    /// Start recording from the microphone. Errors (no mic, no permission) come back here,
+    /// not at stop.
     pub fn start() -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let (ready, opened) = mpsc::channel::<Result<(), String>>();
         let thread = std::thread::spawn(move || {
-            let mic = match rodio::microphone::MicrophoneBuilder::new()
-                .default_device()
-                .and_then(|b| b.default_config())
-                .map_err(|e| e.to_string())
-                .and_then(|b| b.open_stream().map_err(|e| e.to_string()))
-            {
-                Ok(mic) => mic,
+            let samples = Arc::new(std::sync::Mutex::new(Vec::<f32>::new()));
+            let opened = open_input(samples.clone());
+            let (stream, rate, channels) = match opened {
+                Ok(v) => v,
                 Err(e) => {
-                    let _ = ready.send(Err(e));
+                    let _ = ready.send(Err(e.to_string()));
                     return (Vec::new(), 16_000, 1);
                 }
             };
-            let config = mic.config();
-            let (rate, channels) = (config.sample_rate.get(), config.channel_count.get());
             let _ = ready.send(Ok(()));
             let limit = (rate * MAX_SECONDS) as usize * channels as usize;
-            let mut samples = Vec::with_capacity(rate as usize * channels as usize * 10);
-            for s in mic {
-                samples.push(s);
-                if samples.len() >= limit
-                    || (samples.len() % 512 == 0 && flag.load(Ordering::Relaxed))
-                {
-                    break;
-                }
+            while !flag.load(Ordering::Relaxed) && samples.lock().map_or(0, |s| s.len()) < limit {
+                std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            (samples, rate, channels)
+            drop(stream);
+            let taken = std::mem::take(&mut *samples.lock().unwrap_or_else(|e| e.into_inner()));
+            (taken, rate, channels)
         });
         match opened.recv() {
             Ok(Ok(())) => Ok(Self {
                 stop,
                 thread: Some(thread),
             }),
-            Ok(Err(e)) => Err(anyhow!("Cannot open the microphone: {e}")),
+            Ok(Err(e)) => Err(anyhow!("{e}")),
             Err(_) => Err(anyhow!("Cannot open the microphone")),
         }
     }
@@ -152,4 +143,60 @@ impl Drop for Playback {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// The microphone: on Linux through PulseAudio/PipeWire (ALSA's "default" capture is often
+/// unavailable there), skipping speaker monitors; elsewhere the system default input.
+fn open_input(samples: Arc<std::sync::Mutex<Vec<f32>>>) -> Result<(rodio::cpal::Stream, u32, u16)> {
+    use rodio::cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    let name = |d: &rodio::cpal::Device| {
+        d.description()
+            .map(|x| x.name().to_string())
+            .unwrap_or_default()
+    };
+    #[cfg(target_os = "linux")]
+    let host = rodio::cpal::host_from_id(rodio::cpal::HostId::PulseAudio)
+        .unwrap_or_else(|_| rodio::cpal::default_host());
+    #[cfg(not(target_os = "linux"))]
+    let host = rodio::cpal::default_host();
+    let monitor = |d: &rodio::cpal::Device| name(d).starts_with("Monitor of");
+    let device = host
+        .default_input_device()
+        .filter(|d| !monitor(d))
+        .or_else(|| host.input_devices().ok()?.find(|d| !monitor(d)))
+        .context("No microphone on this PC. Pair your phone and use it as the microphone.")?;
+    let config = device
+        .default_input_config()
+        .context("The microphone has no usable settings")?;
+    let (rate, channels) = (config.sample_rate(), config.channels());
+    let push = move |data: &mut dyn Iterator<Item = f32>| {
+        if let Ok(mut s) = samples.lock() {
+            s.extend(data);
+        }
+    };
+    let err = |e| eprintln!("Microphone error: {e}");
+    let stream = match config.sample_format() {
+        rodio::cpal::SampleFormat::F32 => device.build_input_stream(
+            config.config(),
+            move |d: &[f32], _| push(&mut d.iter().copied()),
+            err,
+            None,
+        ),
+        rodio::cpal::SampleFormat::I16 => device.build_input_stream(
+            config.config(),
+            move |d: &[i16], _| push(&mut d.iter().map(|s| *s as f32 / 32768.0)),
+            err,
+            None,
+        ),
+        rodio::cpal::SampleFormat::U16 => device.build_input_stream(
+            config.config(),
+            move |d: &[u16], _| push(&mut d.iter().map(|s| (*s as f32 - 32768.0) / 32768.0)),
+            err,
+            None,
+        ),
+        other => bail!("Unsupported microphone format {other:?}"),
+    }
+    .with_context(|| format!("Cannot open the microphone {}", name(&device)))?;
+    stream.play()?;
+    Ok((stream, rate, channels))
 }

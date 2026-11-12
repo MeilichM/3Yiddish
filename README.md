@@ -34,6 +34,12 @@ Got a file instead?
 3yiddish transcribe shiur.mp3
 ```
 
+**Type Yiddish anywhere (push-to-talk).** Run `3yiddish dictate`, then hold **F9** in any app
+(email, WhatsApp, Word, a forum), speak, and let go: the Yiddish is typed right where your cursor
+is. Pick another key with `3yiddish dictate --key CapsLock`. On Linux, add a keyboard shortcut in
+your desktop settings; `3yiddish dictate` prints the exact line to paste. No microphone on the
+PC? Pair your phone and it becomes the mic.
+
 Fancy bonus stuff:
 - **Phone as a mic.** Pair your phone from the **Phone** tab and talk into that.
 - **Read-aloud game.** Read lines out loud, get a score, and help the model get smarter.

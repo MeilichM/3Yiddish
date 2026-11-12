@@ -78,6 +78,14 @@ enum Command {
         #[command(subcommand)]
         action: ModelAction,
     },
+    /// Push-to-talk: hold a key anywhere, speak, let go, and the Yiddish is typed where you are.
+    Dictate {
+        /// start | stop | toggle (for compositor key bindings on Wayland)
+        action: Option<String>,
+        /// Hold-to-talk key: F1-F12, CapsLock, ScrollLock, Pause, RightAlt, RightCtrl, Insert
+        #[arg(long, default_value = "F9")]
+        key: String,
+    },
     /// Update 3Yiddish itself to the latest release.
     Update,
     /// Score the installed (or given) model on a test set: gold.json [{n, gold, audio}].
@@ -136,6 +144,17 @@ async fn main() -> Result<()> {
         args.push("tui".into());
     }
     let mut cli = Cli::parse_from(args);
+    if let Command::Dictate { action, key } = &cli.command {
+        if let Some(action) = action {
+            if !matches!(action.as_str(), "start" | "stop" | "toggle") {
+                bail!("Use: 3yiddish dictate [start|stop|toggle]");
+            }
+            return three_yiddish::dictate::send(action);
+        }
+        three_yiddish::paths::enter_home()?;
+        // Runs on the main thread: macOS needs the keyboard listener there.
+        return three_yiddish::dictate::run(key, &cli.server);
+    }
     if matches!(cli.command, Command::Update) {
         match tokio::task::spawn_blocking(three_yiddish::update::update).await?? {
             Some(version) => {
@@ -308,6 +327,7 @@ async fn main() -> Result<()> {
         | Command::Eval { .. }
         | Command::Model { .. }
         | Command::Update
+        | Command::Dictate { .. }
         | Command::Bench { .. } => unreachable!(),
         Command::Tui { watch } => {
             // One binary: when no 3Yiddish service is running yet, run it inside this process.
