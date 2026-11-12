@@ -47,3 +47,50 @@ pub fn models() -> PathBuf {
 pub fn compute() -> PathBuf {
     PathBuf::from("state/compute")
 }
+
+/// Present where the playground (the phone benchmark) is switched on:
+/// `3yiddish playground on`.
+pub fn playground_marker() -> PathBuf {
+    PathBuf::from("state/playground-on")
+}
+
+/// Written when someone reads the Contribute explanation and accepts it (the number of the
+/// text they accepted). From then on the app's Contribute button opens the playground.
+pub fn contribute_accepted() -> PathBuf {
+    PathBuf::from("state/contribute-accepted")
+}
+
+/// The name a contributor last sent takes under.
+pub fn contributor_name() -> PathBuf {
+    PathBuf::from("state/contributor-name")
+}
+
+/// A contributor's takes, kept apart from the owner's own set in `free_bench`.
+pub fn contributions() -> PathBuf {
+    PathBuf::from("state/contributions")
+}
+
+/// The playground's takes: `items.jsonl` and `audio/`. A held-out exam, never training data.
+pub fn free_bench() -> PathBuf {
+    PathBuf::from("state/free-bench")
+}
+
+/// The code in the phone's pairing link (owner-only file).
+pub fn pair_code() -> PathBuf {
+    PathBuf::from("state/phone-pair-code")
+}
+
+/// The Tailscale HTTPS port a pairing set up, so it can be taken down after a crash.
+pub fn pair_serve() -> PathBuf {
+    PathBuf::from("state/phone-pair-serve")
+}
+
+/// The answer to "Share what you transcribe?": `yes` or `no`; no file means never asked.
+pub fn share() -> PathBuf {
+    PathBuf::from("state/share")
+}
+
+/// What sharing has queued and not sent yet (deleted when sharing is switched off).
+pub fn share_queue() -> PathBuf {
+    PathBuf::from("state/share-queue")
+}

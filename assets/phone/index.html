@@ -1,27 +1,116 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#0f141b"><title>3Yiddish</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
-<body><main>
-<header><span class="brand">3Yiddish</span><span id="connection" role="status">Connecting…</span><button id="pg-open" class="small" hidden>🧪 Test</button><button id="list-open" class="small" hidden>📋 Readings</button></header>
-<section id="setup"><p id="message">Keep this page open.</p><button id="enable" class="hero" hidden>Start</button><button id="play" hidden>Enable playback</button></section>
-<section id="game" hidden>
-  <p id="progress"></p>
-  <p id="headline"></p>
-  <div id="result" hidden>
-    <div class="card"><small>You read</small><p id="read" dir="rtl" lang="yi"></p></div>
-    <div class="card"><small>3Yiddish heard</small><p id="heard" dir="rtl" lang="yi"></p><p id="missed" dir="rtl" lang="yi"></p></div>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
+<meta name="theme-color" content="#0e1116">
+<meta name="robots" content="noindex">
+<link rel="icon" href="data:,">
+<title>3Yiddish playground</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<svg class="defs" aria-hidden="true">
+  <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3" fill="currentColor"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.2v13.6a.8.8 0 0 0 1.2.7l11-6.8a.8.8 0 0 0 0-1.4l-11-6.8A.8.8 0 0 0 8 5.2z" fill="currentColor"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><rect x="6" y="5" width="4.5" height="14" rx="1.5" fill="currentColor"/><rect x="13.5" y="5" width="4.5" height="14" rx="1.5" fill="currentColor"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6.5h11M9 12h11M9 17.5h11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="4.5" cy="6.5" r="1.4" fill="currentColor"/><circle cx="4.5" cy="12" r="1.4" fill="currentColor"/><circle cx="4.5" cy="17.5" r="1.4" fill="currentColor"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M14.5 5.5 8 12l6.5 6.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-again" viewBox="0 0 24 24"><path d="M19 12a7 7 0 1 1-2.2-5.1M19 4.5v4h-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+</svg>
+
+<main id="app">
+  <header id="top">
+    <button id="nav-back" class="icon" aria-label="Back" hidden><svg><use href="#i-back"/></svg></button>
+    <div class="brand"><b>3</b>YIDDISH</div>
+    <div id="count" class="count" aria-label="Takes done"></div>
+    <button id="nav-list" class="icon" aria-label="All takes"><svg><use href="#i-list"/></svg></button>
+  </header>
+  <div id="progress" role="progressbar" aria-valuemin="0"><i id="progress-fill"></i></div>
+  <p id="alert" role="alert" hidden></p>
+
+  <section id="record">
+    <div class="take-no"><span id="take-no">Take 1</span><small id="take-of"></small></div>
+    <div class="idea">
+      <div class="idea-text"><span class="label">An idea, if you want one</span><p id="idea-text" dir="rtl" lang="yi"></p></div>
+      <button id="idea-next" class="icon" aria-label="Another idea"><svg><use href="#i-again"/></svg></button>
+    </div>
+    <div class="stage">
+      <canvas id="wave" hidden></canvas>
+      <div id="timer" hidden>0:00</div>
+      <p id="hint">Tap, and say it in your own words.</p>
+      <div id="thinking" hidden><span class="spinner"></span><span>Writing down what you said</span></div>
+      <button id="retry" class="ghost" hidden>Send it again</button>
+    </div>
+    <button id="rec" class="rec" aria-label="Record"><svg><use id="rec-icon" href="#i-mic"/></svg></button>
+    <p id="rec-note" class="note"></p>
+    <input type="file" id="pick" accept="audio/*" capture hidden>
+  </section>
+
+  <section id="review" hidden>
+    <div class="player">
+      <button id="play" class="round" aria-label="Play"><svg><use id="play-icon" href="#i-play"/></svg></button>
+      <div class="scrub">
+        <input id="seek" type="range" min="0" max="1000" value="0" aria-label="Position">
+        <span id="time">0:00</span>
+      </div>
+      <button id="redo" class="pill"><svg><use href="#i-again"/></svg>Redo</button>
+    </div>
+    <div class="card">
+      <div class="card-head"><span id="take-title"></span><span id="take-status" class="status"></span></div>
+      <p id="words" class="words" dir="rtl" lang="yi"></p>
+      <textarea id="typed" class="field" rows="4" dir="rtl" lang="yi" aria-label="The whole text" hidden></textarea>
+      <p id="help" class="help"></p>
+    </div>
+    <div id="final-card" class="card final">
+      <span class="label">Saved as</span>
+      <p id="final" dir="rtl" lang="yi"></p>
+    </div>
+    <button id="type-out" class="ghost wide">Type it out instead</button>
+    <footer class="actions">
+      <button id="toss" class="ghost danger">Toss</button>
+      <button id="save" class="primary">All correct</button>
+    </footer>
+  </section>
+
+  <section id="list" hidden>
+    <p id="list-title" class="list-title"></p>
+    <div id="items"></div>
+    <footer class="actions"><button id="list-record" class="primary">Record a take</button></footer>
+  </section>
+</main>
+
+<div id="sheet" class="sheet" hidden>
+  <div class="sheet-head">
+    <div><span id="sel-label" class="label">You marked</span><p id="sel" dir="rtl" lang="yi"></p></div>
+    <button id="sheet-close" class="icon" aria-label="Deselect"><svg><use href="#i-close"/></svg></button>
   </div>
-  <div id="next" class="card next"><small id="next-title">Next</small><p id="line" dir="rtl" lang="yi"></p></div>
-  <nav><button id="back" hidden>◀ Back</button><button id="record" class="hero">● Record</button><button id="skip">Skip</button><button id="restart" hidden>↺ Restart</button></nav>
-</section>
-<section id="list" hidden>
-  <div class="bar"><button id="list-close" class="small">◀ Game</button><span id="list-title"></span></div>
-  <div id="items"></div>
-</section>
-<section id="pg" hidden>
-  <div class="bar"><button id="pg-close" class="small">◀ Game</button><span id="pg-title"></span></div>
-  <p class="hint">Play it, then tap the version that is what you actually said.</p>
-  <div id="pg-cards"></div>
-  <nav><button id="pg-prev">◀</button><button id="pg-play" class="hero">▶ Play</button><button id="pg-toss">✗ Toss</button><button id="pg-next">▶</button></nav>
-</section>
-<audio id="player" playsinline></audio>
-</main></body></html>
+  <div id="reasons" class="chips"></div>
+  <input id="note" class="field" type="text" maxlength="200" placeholder="Your reason, in a few words" hidden>
+  <label id="right-label" class="label" for="right">What it should be</label>
+  <textarea id="right" class="field" rows="1" dir="rtl" lang="yi" autocapitalize="off" autocomplete="off" spellcheck="false"></textarea>
+  <p id="right-help" class="help"></p>
+  <div id="insert-row" class="row">
+    <button id="ins-before" class="ghost">Add word before</button>
+    <button id="ins-after" class="ghost">Add word after</button>
+  </div>
+  <div class="row">
+    <button id="mark-remove" class="ghost danger" hidden>Remove</button>
+    <button id="mark-cancel" class="ghost">Cancel</button>
+    <button id="mark-save" class="primary">Save mark</button>
+  </div>
+</div>
+
+<div id="ask" class="ask" hidden>
+  <div class="ask-box">
+    <p id="ask-text"></p>
+    <div class="row"><button id="ask-no" class="ghost">Keep it</button><button id="ask-yes" class="primary danger">Record again</button></div>
+  </div>
+</div>
+<audio id="player" preload="auto"></audio>
+</body>
+</html>

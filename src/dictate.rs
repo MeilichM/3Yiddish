@@ -43,6 +43,7 @@ pub fn run(key: &str, server: &str) -> Result<()> {
         server: server.trim_end_matches('/').to_owned(),
         engine: None,
     }));
+    crate::audio::warm();
     let listener = TcpListener::bind(CONTROL).context("Dictation is already running")?;
     let control = state.clone();
     std::thread::spawn(move || {

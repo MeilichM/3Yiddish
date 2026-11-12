@@ -42,9 +42,10 @@ enum ModelAction {
 enum Command {
     /// Run the HTTP service. Never starts or rents a model automatically.
     Serve,
-    /// Open the terminal playground and live training monitor.
+    /// Open the app (the same as running `3yiddish` alone).
     Tui {
-        #[arg(long, value_name = "NAME=STATUS_JSON")]
+        /// No longer used; accepted so a Refresh from an older version still starts.
+        #[arg(long, hide = true)]
         watch: Vec<String>,
     },
     /// Check service configuration status without loading models or making inference calls.
@@ -90,6 +91,10 @@ enum Command {
     Update,
     /// Termux on a phone: get a font in which Yiddish letters are drawn properly.
     Font,
+    /// Score transcripts made elsewhere against a test set, with the same measure as `bench`:
+    /// HEARD is a JSON object {audio file name: transcript}.
+    #[command(hide = true)]
+    Score { gold: PathBuf, heard: PathBuf },
     /// Score the installed (or given) model on a test set: gold.json [{n, gold, audio}].
     Bench {
         gold: PathBuf,
@@ -101,6 +106,19 @@ enum Command {
         /// Print totals only (for public CI logs).
         #[arg(long)]
         summary: bool,
+    },
+    /// The owner's benchmark: speak freely into a paired phone and correct the draft.
+    /// `on` shows Pair phone in the app, `off` hides it, `status` says where things stand.
+    #[command(hide = true)]
+    Playground {
+        #[arg(value_parser = ["on", "off", "status"], default_value = "status")]
+        action: String,
+    },
+    /// Sharing what you transcribe with 3Yiddish: `on`, `off` (also deletes what is
+    /// waiting), `status`, or `now` (send what is waiting).
+    Share {
+        #[arg(value_parser = ["on", "off", "status", "now"], default_value = "status")]
+        action: String,
     },
     /// Search the local cultural notes.
     #[command(hide = true)]
@@ -179,6 +197,103 @@ async fn main() -> Result<()> {
             }
             None => println!("3Yiddish {} is the latest.", env!("CARGO_PKG_VERSION")),
         }
+        return Ok(());
+    }
+    if let Command::Share { action } = &cli.command {
+        use three_yiddish::share;
+        three_yiddish::paths::enter_home()?;
+        let owner = three_yiddish::phone::owner();
+        match action.as_str() {
+            "on" if owner => {
+                bail!("This computer has the owner's playground switched on; it never shares.")
+            }
+            "on" => {
+                share::set(true)?;
+                println!("{}\n", share::WHAT);
+            }
+            "off" => share::set(false)?,
+            "now" if share::active() => {
+                let sent =
+                    share::send(&share::Queue::here(), &share::relay(), true, share::active).await;
+                println!("Sent {sent}.");
+            }
+            _ => {}
+        }
+        let items = share::Queue::here().items();
+        let bytes: u64 = items.iter().map(|i| i.bytes).sum();
+        println!(
+            "Sharing: {}",
+            match (owner, share::answer()) {
+                (true, _) => "never on this computer (the owner's playground is on)",
+                (false, Some(true)) => "on",
+                (false, Some(false)) => "off",
+                (false, None) => "off (not asked yet)",
+            }
+        );
+        if !items.is_empty() {
+            println!(
+                "Waiting to be sent: {} ({:.1} MB)",
+                items.len(),
+                bytes as f64 / 1e6
+            );
+        }
+        if share::on() {
+            println!("{}", share::OFF);
+        }
+        return Ok(());
+    }
+    if let Command::Playground { action } = &cli.command {
+        let home = three_yiddish::paths::enter_home()?;
+        let marker = three_yiddish::paths::playground_marker();
+        match action.as_str() {
+            "on" => std::fs::write(&marker, "")?,
+            "off" => {
+                let _ = std::fs::remove_file(&marker);
+                // The pairing link dies too, and nothing of it stays on Tailscale.
+                three_yiddish::phone::forget();
+            }
+            _ => {}
+        }
+        let folder = home.join(three_yiddish::paths::free_bench());
+        let takes = three_yiddish::freebench::Store::new(&folder).load()?;
+        let count = |status: &str| takes.iter().filter(|t| t.status == status).count();
+        println!(
+            "Playground: {}",
+            if marker.exists() {
+                "on (Pair phone shows in the app; Refresh an app that is open)"
+            } else {
+                "off"
+            }
+        );
+        println!("Takes: {}", folder.display());
+        println!(
+            "{} of {} done ({} correct, {} fixed); {} to review, {} tossed",
+            count("correct") + count("fixed"),
+            three_yiddish::freebench::GOAL,
+            count("correct"),
+            count("fixed"),
+            count("pending"),
+            count("tossed")
+        );
+        println!("A held-out exam: these takes are never training data.");
+        return Ok(());
+    }
+    if let Command::Score { gold, heard } = &cli.command {
+        let items: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(gold)?)?;
+        let heard: std::collections::HashMap<String, String> =
+            serde_json::from_slice(&std::fs::read(heard)?)?;
+        let mut total = 0.0;
+        for item in &items {
+            let text = heard
+                .get(item["audio"].as_str().unwrap_or_default())
+                .map(String::as_str)
+                .unwrap_or_default();
+            let (_, cer) =
+                three_yiddish::tui::errors(item["gold"].as_str().unwrap_or_default(), text)?;
+            total += (1.0 - cer).max(0.0);
+        }
+        let mean = total / items.len().max(1) as f64;
+        println!("{}", (mean * 1000.0).round() / 10.0);
         return Ok(());
     }
     if let Command::Bench {
@@ -284,6 +399,9 @@ async fn main() -> Result<()> {
                     None => println!("No Transcribe model installed. Run: 3yiddish model pull"),
                 }
                 println!("Engine: {}", three_yiddish::asr::preferred().label());
+                if let Some(gpu) = three_yiddish::asr::gpu_name() {
+                    println!("GPU: {gpu}");
+                }
             }
             ModelAction::Rollback => {
                 println!("Now using {}", three_yiddish::model::rollback(&models)?);
@@ -373,8 +491,11 @@ async fn main() -> Result<()> {
         | Command::Update
         | Command::Font
         | Command::Dictate { .. }
+        | Command::Score { .. }
+        | Command::Playground { .. }
+        | Command::Share { .. }
         | Command::Bench { .. } => unreachable!(),
-        Command::Tui { watch } => {
+        Command::Tui { .. } => {
             // One binary: when no 3Yiddish service is running yet, run it inside this process.
             if client
                 .get(format!("{base}/v1/status"))
@@ -395,7 +516,7 @@ async fn main() -> Result<()> {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
             }
-            three_yiddish::tui::run(client, base.to_owned(), watch, cli.config).await?;
+            three_yiddish::tui::run(client, base.to_owned()).await?;
         }
         Command::Doctor => {
             println!(
@@ -573,93 +694,27 @@ fn online(error: anyhow::Error) -> anyhow::Error {
     anyhow::anyhow!(three_yiddish::model::plain_error(&error))
 }
 
-/// The HTTP API (plus the phone gateway when configured). `3yiddish serve` runs it in the
+/// The HTTP API. `3yiddish serve` runs it in the
 /// foreground (and says where it listens); the TUI starts it in the background when nothing
 /// is listening yet.
 async fn serve(config: Config, announce: bool) -> Result<()> {
     let listen = config.listen;
-    let phone_config = config.phone.clone();
     let app = App::new(config)?;
+    // A phone link left on Tailscale by a run that ended badly is taken down first.
+    tokio::task::spawn_blocking(three_yiddish::phone::reconcile).await?;
     let listener = tokio::net::TcpListener::bind(listen).await?;
-    if let Some(phone) = phone_config {
-        let address = phone.listen;
-        if let Some(download_address) = phone.certificate_download_listen {
-            let certificate = tokio::fs::read(
-                phone
-                    .trust_certificate
-                    .as_ref()
-                    .context("Missing trust_certificate")?,
-            )
-            .await?;
-            let download_listener = tokio::net::TcpListener::bind(download_address)
-                .await
-                .context("Cannot bind public certificate download")?;
-            let download = axum::Router::new().route(
-                "/3yiddish-ca.crt",
-                axum::routing::get(move || {
-                    let certificate = certificate.clone();
-                    async move {
-                        (
-                            [
-                                ("content-type", "application/x-x509-ca-cert"),
-                                (
-                                    "content-disposition",
-                                    "attachment; filename=3yiddish-ca.crt",
-                                ),
-                                ("cache-control", "no-store"),
-                            ],
-                            certificate,
-                        )
-                    }
-                }),
-            );
-            tokio::spawn(async move {
-                if let Err(error) = axum::serve(download_listener, download).await {
-                    eprintln!("Certificate download stopped: {error}");
-                }
-            });
-        }
-        let phone_listener = tokio::net::TcpListener::bind(address)
-            .await
-            .context("Cannot bind the phone audio gateway")?;
-        let phone_app = app.clone();
-        let tls = if let (Some(cert), Some(key)) = (phone.tls_cert, phone.tls_key) {
-            let _ = rustls::crypto::ring::default_provider().install_default();
-            Some(
-                axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
-                    .await
-                    .context("Cannot load phone HTTPS certificate")?,
-            )
-        } else {
-            None
-        };
-        tokio::spawn(async move {
-            let gateway = three_yiddish::phone::gateway(phone_app);
-            let result = if let Some(tls) = tls {
-                match phone_listener.into_std() {
-                    Ok(listener) => match axum_server::from_tcp_rustls(listener, tls) {
-                        Ok(server) => server.serve(gateway.into_make_service()).await,
-                        Err(error) => Err(error),
-                    },
-                    Err(error) => Err(error),
-                }
-            } else {
-                axum::serve(phone_listener, gateway).await
-            };
-            if let Err(error) = result {
-                eprintln!("Phone gateway stopped: {error}");
-            }
-        });
-    }
     // Inside the app the screen is about to take over the terminal; a line printed here would
     // be left on it.
     if announce {
         eprintln!("3Yiddish listening on {listen}; request content and credentials are not logged");
     }
+    let phone = app.phone_hub();
     axum::serve(listener, router(app))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
+    // A paired phone's page goes off Tailscale with the service; its link is kept.
+    phone.shutdown().await;
     Ok(())
 }

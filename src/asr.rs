@@ -58,17 +58,63 @@ unsafe extern "C" {
     fn ggml_backend_dev_count() -> usize;
     fn ggml_backend_dev_get(index: usize) -> *mut std::ffi::c_void;
     fn ggml_backend_dev_type(device: *mut std::ffi::c_void) -> std::ffi::c_int;
+    fn ggml_backend_dev_description(device: *mut std::ffi::c_void) -> *const std::ffi::c_char;
+    fn ggml_backend_dev_memory(device: *mut std::ffi::c_void, free: *mut usize, total: *mut usize);
+}
+
+/// The GPUs ggml can run on, in whisper.cpp's own numbering: (separate card, name, free
+/// memory in bytes).
+fn gpu_list() -> Vec<(bool, String, usize)> {
+    whisper_rs::install_logging_hooks(); // keep the driver's start-up lines off the screen
+    // SAFETY: plain queries of ggml's own device list; every index is below its count, and
+    // the description is a string ggml owns for the whole run.
+    unsafe {
+        (0..ggml_backend_dev_count())
+            .map(|i| ggml_backend_dev_get(i))
+            .filter(|&dev| matches!(ggml_backend_dev_type(dev), 1 | 2))
+            .map(|dev| {
+                let name = ggml_backend_dev_description(dev);
+                let name = if name.is_null() {
+                    String::new()
+                } else {
+                    std::ffi::CStr::from_ptr(name)
+                        .to_string_lossy()
+                        .into_owned()
+                };
+                let (mut free, mut total) = (0usize, 0usize);
+                ggml_backend_dev_memory(dev, &mut free, &mut total);
+                (ggml_backend_dev_type(dev) == 1, name, free)
+            })
+            .collect()
+    }
+}
+
+/// Which GPU to run on, as whisper.cpp numbers them: a separate card before one built into
+/// the processor (a laptop often has both, and the built-in one comes first and can be too
+/// small for the model), and among equals the one with the most free memory.
+fn pick_gpu(list: &[(bool, String, usize)]) -> Option<usize> {
+    (0..list.len()).max_by_key(|&i| (separate_card(&list[i]), list[i].2, std::cmp::Reverse(i)))
+}
+
+/// A card of its own. Some drivers do not say, so the name decides for the known built-in
+/// families.
+fn separate_card(gpu: &(bool, String, usize)) -> bool {
+    let name = gpu.1.to_lowercase();
+    let built_in =
+        name.contains("intel") && !name.contains("arc(tm) a") && !name.contains("arc(tm) b")
+            || name.contains("llvmpipe");
+    gpu.0 && !built_in
+}
+
+/// The GPU the app would use, by name (for `3yiddish model status`).
+pub fn gpu_name() -> Option<String> {
+    let list = gpu_list();
+    pick_gpu(&list).map(|i| list[i].1.clone())
 }
 
 /// How many GPUs (separate or built into the processor) ggml can run on.
 fn gpu_devices() -> usize {
-    whisper_rs::install_logging_hooks(); // keep the driver's start-up lines off the screen
-    // SAFETY: plain queries of ggml's own device list; every index is below its count.
-    unsafe {
-        (0..ggml_backend_dev_count())
-            .filter(|&i| matches!(ggml_backend_dev_type(ggml_backend_dev_get(i)), 1 | 2))
-            .count()
-    }
+    gpu_list().len()
 }
 
 /// Whether the GPU can really be used: this binary has GPU support and the computer has a
@@ -154,6 +200,7 @@ struct Loaded {
 fn context(model: &Path, gpu: bool) -> Result<WhisperContext> {
     let params = WhisperContextParameters {
         use_gpu: gpu,
+        gpu_device: pick_gpu(&gpu_list()).unwrap_or(0) as std::ffi::c_int,
         // Faster encoder, same benchmark score on CPU and GPU. THREE_YIDDISH_FLASH=0 turns it
         // off (for checks).
         flash_attn: std::env::var("THREE_YIDDISH_FLASH").map_or(true, |v| v != "0"),
@@ -428,6 +475,28 @@ mod tests {
         assert_eq!(resolve(Some("fast"), Some("cpu"), true), Cpu);
         assert_eq!(resolve(None, Some("GPU please"), true), Gpu);
         assert_eq!(resolve(Some(""), Some(""), false), Cpu);
+    }
+
+    #[test]
+    fn a_separate_card_is_picked_before_a_built_in_one() {
+        let gpu = |own, name: &str, free| (own, name.to_owned(), free);
+        assert_eq!(pick_gpu(&[]), None);
+        let laptop = [
+            gpu(true, "Intel(R) Graphics (ARL)", 30 << 30),
+            gpu(true, "NVIDIA RTX A1000", 2 << 30),
+        ];
+        assert_eq!(pick_gpu(&laptop), Some(1));
+        let typed = [
+            gpu(false, "Radeon 890M", 8 << 30),
+            gpu(true, "RX 7600", 6 << 30),
+        ];
+        assert_eq!(pick_gpu(&typed), Some(1));
+        assert_eq!(pick_gpu(&[gpu(false, "Radeon 890M", 8 << 30)]), Some(0));
+        let two = [
+            gpu(true, "RTX 3060", 4 << 30),
+            gpu(true, "RTX 4090", 20 << 30),
+        ];
+        assert_eq!(pick_gpu(&two), Some(1));
     }
 
     #[test]

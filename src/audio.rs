@@ -12,113 +12,170 @@ pub use termux::*;
 
 #[cfg(not(target_os = "android"))]
 mod native {
-    use anyhow::{Context, Result, anyhow, bail};
+    use anyhow::{Context, Result, bail};
     use std::{
         path::Path,
-        sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-            mpsc,
-        },
-        thread::JoinHandle,
+        sync::{Arc, Mutex, OnceLock},
+        time::{Duration, Instant},
     };
 
     use super::MAX_SECONDS;
     /// The longest to wait after Stop for audio still on its way from the system.
-    const MAX_WAIT_MS: u64 = 4000;
+    const MAX_WAIT_MS: u64 = 2500;
+    /// How much sound from just before a take began is kept as its start.
+    const LEAD_MS: usize = 200;
 
     /// The microphone's loudness is known while recording (for the live wave).
     pub const LIVE_LEVEL: bool = true;
     /// Playback can pause where it is and jump to another moment.
     pub const SEEKS: bool = true;
 
+    /// The microphone, opened once and kept open while the app runs, so a take starts the
+    /// instant it is asked for (opening a device takes from a blink to more than a second,
+    /// and whatever is said meanwhile would be lost). What it hears outside a take is thrown
+    /// away at once, but for the last moment, which becomes the start of the next take.
+    struct Mic {
+        tape: Mutex<Tape>,
+        /// Set once the device is open: its sample rate and channels.
+        format: OnceLock<(u32, u16)>,
+        /// Why it could not be opened, or that it stopped working.
+        failure: Mutex<Option<String>>,
+    }
+
+    #[derive(Default)]
+    struct Tape {
+        data: Vec<f32>,
+        /// A take is being recorded: keep everything.
+        keeping: bool,
+        /// When sound last arrived, and the longest wait between two arrivals lately.
+        last: Option<Instant>,
+        gap: Duration,
+    }
+
+    static MIC: Mutex<Option<Arc<Mic>>> = Mutex::new(None);
+
+    /// Open the microphone now, in the background, so the first take starts at once too.
+    /// Does nothing when it is already open (or opening).
+    pub fn warm() {
+        mic();
+    }
+
+    fn mic() -> Arc<Mic> {
+        let mut slot = MIC.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(mic) = slot.as_ref()
+            && mic.failure.lock().is_ok_and(|f| f.is_none())
+        {
+            return mic.clone();
+        }
+        let mic = Arc::new(Mic {
+            tape: Mutex::new(Tape::default()),
+            format: OnceLock::new(),
+            failure: Mutex::new(None),
+        });
+        *slot = Some(mic.clone());
+        let own = mic.clone();
+        // The stream lives on its own thread for as long as it works.
+        std::thread::spawn(move || {
+            let fail = |why: String| {
+                if let Ok(mut failure) = own.failure.lock() {
+                    failure.get_or_insert(why);
+                }
+            };
+            match open_input(own.clone()) {
+                Ok((_stream, rate, channels)) => {
+                    let _ = own.format.set((rate, channels));
+                    while own.failure.lock().is_ok_and(|f| f.is_none()) {
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                }
+                Err(e) => fail(e.to_string()),
+            }
+        });
+        mic
+    }
+
+    impl Mic {
+        fn failed(&self) -> Option<String> {
+            self.failure.lock().ok().and_then(|f| f.clone())
+        }
+        /// Sound from the device: kept for the take, or only its last moment.
+        fn hear(&self, data: &mut dyn Iterator<Item = f32>) {
+            let Ok(mut tape) = self.tape.lock() else {
+                return;
+            };
+            tape.data.extend(data);
+            let now = Instant::now();
+            if let Some(last) = tape.last {
+                // Forgets slowly, so one late arrival does not rule for long.
+                tape.gap = (tape.gap * 9 / 10).max(now - last);
+            }
+            tape.last = Some(now);
+            let (rate, channels) = self.format.get().copied().unwrap_or((48_000, 2));
+            let most = if tape.keeping {
+                (rate * MAX_SECONDS) as usize * channels as usize
+            } else {
+                (rate as usize * channels as usize * LEAD_MS / 1000) / channels as usize
+                    * channels as usize
+            };
+            if !tape.keeping && tape.data.len() > most {
+                let extra = tape.data.len() - most;
+                tape.data.drain(..extra);
+            } else if tape.data.len() > most {
+                tape.data.truncate(most);
+            }
+        }
+    }
+
     pub struct Recorder {
-        stop: Arc<AtomicBool>,
-        thread: Option<JoinHandle<(Vec<f32>, u32, u16)>>,
-        samples: Arc<std::sync::Mutex<Vec<f32>>>,
-        opened: mpsc::Receiver<Result<(), String>>,
-        failure: Option<String>,
+        mic: Arc<Mic>,
+        /// The microphone was not open yet when this take began (it pops as it switches on).
+        cold: bool,
+        done: bool,
     }
 
     impl Recorder {
         /// Start recording and wait until the microphone is open. Errors (no mic, no
         /// permission) come back here, not at stop.
         pub fn start() -> Result<Self> {
-            let recorder = Self::start_now();
-            match recorder.opened.recv() {
-                Ok(Ok(())) => Ok(recorder),
-                Ok(Err(e)) => Err(anyhow!("{e}")),
-                Err(_) => Err(anyhow!("Cannot open the microphone")),
+            let mut recorder = Self::start_now();
+            let give_up = Instant::now() + Duration::from_secs(5);
+            while recorder.mic.format.get().is_none() {
+                if let Some(why) = recorder.failed() {
+                    bail!(why);
+                }
+                if Instant::now() > give_up {
+                    bail!("Cannot open the microphone");
+                }
+                std::thread::sleep(Duration::from_millis(10));
             }
+            Ok(recorder)
         }
 
-        /// Start recording without waiting: opening the device happens on its own thread, so
-        /// the caller (the screen) never stalls. Ask `failed()` later.
+        /// Start recording at once, never waiting for the device. With the microphone
+        /// already open (see `warm`) the take begins a moment before now, so not even the
+        /// first sound is lost. Ask `failed()` later.
         pub fn start_now() -> Self {
-            let stop = Arc::new(AtomicBool::new(false));
-            let flag = stop.clone();
-            let (ready, opened) = mpsc::channel::<Result<(), String>>();
-            let samples = Arc::new(std::sync::Mutex::new(Vec::<f32>::new()));
-            let shared = samples.clone();
-            let thread = std::thread::spawn(move || {
-                let opened = open_input(samples.clone());
-                let (stream, rate, channels) = match opened {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let _ = ready.send(Err(e.to_string()));
-                        return (Vec::new(), 16_000, 1);
-                    }
-                };
-                let _ = ready.send(Ok(()));
-                let opened_at = std::time::Instant::now();
-                let limit = (rate * MAX_SECONDS) as usize * channels as usize;
-                while !flag.load(Ordering::Relaxed) && samples.lock().map_or(0, |s| s.len()) < limit
-                {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                // Sound reaches us late (the system's audio buffer can hold a second or more),
-                // so at Stop the last words have not arrived yet. Keep listening until as much
-                // audio has come in as time has passed since the microphone opened; that is
-                // exactly everything said up to the moment of Stop, whatever the delay.
-                let stopped_at = std::time::Instant::now();
-                let want = (((stopped_at - opened_at).as_secs_f64() * rate as f64) as usize
-                    * channels as usize)
-                    .min(limit);
-                let give_up = stopped_at + std::time::Duration::from_millis(MAX_WAIT_MS);
-                while samples.lock().map_or(0, |s| s.len()) < want
-                    && std::time::Instant::now() < give_up
-                {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                drop(stream);
-                let mut taken =
-                    std::mem::take(&mut *samples.lock().unwrap_or_else(|e| e.into_inner()));
-                taken.truncate(want.max(channels as usize));
-                (taken, rate, channels)
-            });
+            let mic = mic();
+            let cold = mic.format.get().is_none();
+            if let Ok(mut tape) = mic.tape.lock() {
+                tape.keeping = true;
+            }
             Self {
-                stop,
-                thread: Some(thread),
-                samples: shared,
-                opened,
-                failure: None,
+                mic,
+                cold,
+                done: false,
             }
         }
 
         /// Why the microphone could not be opened, once that is known.
         pub fn failed(&mut self) -> Option<String> {
-            if self.failure.is_none()
-                && let Ok(Err(e)) = self.opened.try_recv()
-            {
-                self.failure = Some(e);
-            }
-            self.failure.clone()
+            self.mic.failed()
         }
 
         /// How loud the microphone is right now, 0 to 1 (the peak of the last moment).
         pub fn level(&self) -> f32 {
-            self.samples.lock().map_or(0.0, |s| {
-                s[s.len().saturating_sub(2400)..]
+            self.mic.tape.lock().map_or(0.0, |t| {
+                t.data[t.data.len().saturating_sub(2400)..]
                     .iter()
                     .fold(0.0f32, |peak, v| peak.max(v.abs()))
             })
@@ -126,33 +183,60 @@ mod native {
 
         /// True once the recording hit its time limit by itself.
         pub fn finished(&self) -> bool {
-            self.thread.as_ref().is_none_or(|t| t.is_finished())
+            let Some((rate, channels)) = self.mic.format.get().copied() else {
+                return false;
+            };
+            self.mic
+                .tape
+                .lock()
+                .is_ok_and(|t| t.data.len() >= (rate * MAX_SECONDS) as usize * channels as usize)
         }
 
-        /// Stop and return 16 kHz mono samples.
+        /// Stop and return 16 kHz mono samples. Sound reaches the app a little late, in
+        /// portions, so the last words are still on their way at Stop: wait for the portions
+        /// that hold them (a blink, normally), never for a fixed time.
         pub fn stop(mut self) -> Result<Vec<f32>> {
-            self.stop.store(true, Ordering::Relaxed);
-            let (samples, rate, channels) = self
-                .thread
-                .take()
-                .context("Recording already stopped")?
-                .join()
-                .map_err(|_| anyhow!("The recording thread crashed"))?;
+            let stopped = Instant::now();
+            let arrived = |after: Instant| {
+                self.mic
+                    .tape
+                    .lock()
+                    .is_ok_and(|t| t.last.is_some_and(|last| last > after))
+            };
+            let gap = self.mic.tape.lock().map_or(Duration::ZERO, |t| t.gap);
+            let through = stopped + (gap * 2).max(Duration::from_millis(80));
+            let give_up = stopped + Duration::from_millis(MAX_WAIT_MS);
+            while !arrived(through) && Instant::now() < give_up && self.mic.failed().is_none() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            self.done = true;
+            let samples = {
+                let mut tape = self.mic.tape.lock().unwrap_or_else(|e| e.into_inner());
+                tape.keeping = false;
+                std::mem::take(&mut tape.data)
+            };
+            let Some((rate, channels)) = self.mic.format.get().copied() else {
+                bail!(
+                    self.mic
+                        .failed()
+                        .unwrap_or_else(|| "Cannot open the microphone".into())
+                );
+            };
             let ch = channels.max(1) as usize;
             let mono: Vec<f32> = samples
                 .chunks(ch)
                 .map(|f| f.iter().sum::<f32>() / ch as f32)
                 .collect();
-            Ok(declick(crate::asr::resample(&mono, rate)))
+            Ok(declick(crate::asr::resample(&mono, rate), self.cold))
         }
     }
 
-    /// Microphones pop when they switch on. Drop that first instant and ease the take in and
-    /// out, so there is no click at either end.
-    fn declick(mut pcm: Vec<f32>) -> Vec<f32> {
+    /// Ease the take in and out, so there is no click at either end. A microphone that was
+    /// only just switched on pops: then that first instant is dropped too.
+    fn declick(mut pcm: Vec<f32>, cold: bool) -> Vec<f32> {
         const SKIP: usize = 16_000 * 12 / 100; // the first 0.12 s
-        const FADE: usize = 16_000 * 3 / 100; // 30 ms
-        if pcm.len() > SKIP * 4 {
+        const FADE: usize = 16_000 / 100; // 10 ms
+        if cold && pcm.len() > SKIP * 4 {
             pcm.drain(..SKIP);
         }
         let fade = FADE.min(pcm.len() / 2);
@@ -167,7 +251,13 @@ mod native {
 
     impl Drop for Recorder {
         fn drop(&mut self) {
-            self.stop.store(true, Ordering::Relaxed);
+            // Dropped without `stop`: the take is let go.
+            if !self.done
+                && let Ok(mut tape) = self.mic.tape.lock()
+            {
+                tape.keeping = false;
+                tape.data.clear();
+            }
         }
     }
 
@@ -264,9 +354,7 @@ mod native {
 
     /// The microphone: on Linux through PulseAudio/PipeWire (ALSA's "default" capture is often
     /// unavailable there), skipping speaker monitors; elsewhere the system default input.
-    fn open_input(
-        samples: Arc<std::sync::Mutex<Vec<f32>>>,
-    ) -> Result<(rodio::cpal::Stream, u32, u16)> {
+    fn open_input(mic: Arc<Mic>) -> Result<(rodio::cpal::Stream, u32, u16)> {
         use rodio::cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
         let name = |d: &rodio::cpal::Device| {
             d.description()
@@ -290,29 +378,53 @@ mod native {
             .default_input_config()
             .context("The microphone has no usable settings")?;
         let (rate, channels) = (config.sample_rate(), config.channels());
-        let push = move |data: &mut dyn Iterator<Item = f32>| {
-            if let Ok(mut s) = samples.lock() {
-                s.extend(data);
-            }
+        // Sound in small portions (20 ms): the system's own choice can be a second or more
+        // each, and then every take would end that much late. Where the device refuses that
+        // size, its own choice it is.
+        let frames = match config.buffer_size() {
+            rodio::cpal::SupportedBufferSize::Range { min, max } => (rate / 50).clamp(*min, *max),
+            rodio::cpal::SupportedBufferSize::Unknown => rate / 50,
         };
-        use rodio::cpal::SampleFormat as F;
-        let cfg = config.config();
-        let stream = match config.sample_format() {
-            F::F32 => build::<f32>(&device, &cfg, push),
-            F::F64 => build::<f64>(&device, &cfg, push),
-            F::I8 => build::<i8>(&device, &cfg, push),
-            F::I16 => build::<i16>(&device, &cfg, push),
-            F::I32 => build::<i32>(&device, &cfg, push),
-            F::I64 => build::<i64>(&device, &cfg, push),
-            F::U8 => build::<u8>(&device, &cfg, push),
-            F::U16 => build::<u16>(&device, &cfg, push),
-            F::U32 => build::<u32>(&device, &cfg, push),
-            F::U64 => build::<u64>(&device, &cfg, push),
-            other => bail!("Unsupported microphone format {other:?}"),
-        }
-        .with_context(|| format!("Cannot open the microphone {}", name(&device)))?;
+        let small = rodio::cpal::StreamConfig {
+            buffer_size: rodio::cpal::BufferSize::Fixed(frames),
+            ..config.config()
+        };
+        let stream = listen(&device, &config, &small, &mic)
+            .or_else(|_| listen(&device, &config, &config.config(), &mic))
+            .with_context(|| format!("Cannot open the microphone {}", name(&device)))?;
         stream.play()?;
         Ok((stream, rate, channels))
+    }
+
+    /// An input stream that feeds the microphone's tape, whatever the device's sample type.
+    fn listen(
+        device: &rodio::cpal::Device,
+        config: &rodio::cpal::SupportedStreamConfig,
+        cfg: &rodio::cpal::StreamConfig,
+        mic: &Arc<Mic>,
+    ) -> Result<rodio::cpal::Stream> {
+        use rodio::cpal::SampleFormat as F;
+        let (ears, broken) = (mic.clone(), mic.clone());
+        let push = move |data: &mut dyn Iterator<Item = f32>| ears.hear(data);
+        // The device went away (unplugged, switched off): the next take opens it afresh.
+        let lost = move || {
+            if let Ok(mut failure) = broken.failure.lock() {
+                failure.get_or_insert("The microphone stopped working. Try again.".into());
+            }
+        };
+        match config.sample_format() {
+            F::F32 => build::<f32>(device, cfg, push, lost),
+            F::F64 => build::<f64>(device, cfg, push, lost),
+            F::I8 => build::<i8>(device, cfg, push, lost),
+            F::I16 => build::<i16>(device, cfg, push, lost),
+            F::I32 => build::<i32>(device, cfg, push, lost),
+            F::I64 => build::<i64>(device, cfg, push, lost),
+            F::U8 => build::<u8>(device, cfg, push, lost),
+            F::U16 => build::<u16>(device, cfg, push, lost),
+            F::U32 => build::<u32>(device, cfg, push, lost),
+            F::U64 => build::<u64>(device, cfg, push, lost),
+            other => bail!("Unsupported microphone format {other:?}"),
+        }
     }
 
     /// Open an input stream for any sample type, converting every sample to f32.
@@ -320,6 +432,7 @@ mod native {
         device: &rodio::cpal::Device,
         config: &rodio::cpal::StreamConfig,
         push: impl Fn(&mut dyn Iterator<Item = f32>) + Send + 'static,
+        lost: impl Fn() + Send + 'static,
     ) -> Result<rodio::cpal::Stream>
     where
         T: rodio::cpal::SizedSample,
@@ -329,8 +442,12 @@ mod native {
         Ok(device.build_input_stream(
             *config,
             move |d: &[T], _| push(&mut d.iter().map(|s| s.to_sample::<f32>())),
-            // A dropped buffer is not worth printing over the screen; the take goes on.
-            |_| {},
+            // A dropped buffer is not worth stopping for; a device that is gone is.
+            move |error| {
+                if matches!(error.kind(), rodio::cpal::ErrorKind::DeviceNotAvailable) {
+                    lost()
+                }
+            },
             None,
         )?)
     }
@@ -442,6 +559,9 @@ mod termux {
             None => Ok(()),
         }
     }
+
+    /// Nothing to open ahead of time: the phone's recorder starts when asked.
+    pub fn warm() {}
 
     pub struct Recorder {
         path: PathBuf,
@@ -601,6 +721,40 @@ mod termux {
     impl Drop for Playback {
         fn drop(&mut self) {
             self.stop();
+        }
+    }
+}
+
+#[cfg(all(test, not(target_os = "android")))]
+mod tests {
+    /// Run by hand (`cargo test mic_timing -- --ignored --nocapture`): needs a microphone.
+    #[test]
+    #[ignore]
+    fn mic_timing() {
+        let at = std::time::Instant::now();
+        let cold = super::Recorder::start().unwrap();
+        println!("microphone open after {:?}", at.elapsed());
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let at = std::time::Instant::now();
+        let pcm = cold.stop().unwrap();
+        println!(
+            "cold take: stop took {:?}, {:.2} s of sound",
+            at.elapsed(),
+            pcm.len() as f32 / 16_000.0
+        );
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        for _ in 0..3 {
+            let at = std::time::Instant::now();
+            let warm = super::Recorder::start_now();
+            let began = at.elapsed();
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            let at = std::time::Instant::now();
+            let pcm = warm.stop().unwrap();
+            println!(
+                "warm take: start took {began:?}, stop took {:?}, {:.2} s of sound for 1.00 s held",
+                at.elapsed(),
+                pcm.len() as f32 / 16_000.0
+            );
         }
     }
 }

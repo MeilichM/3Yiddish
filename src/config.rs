@@ -111,9 +111,6 @@ impl Config {
                 .to_string_lossy()
                 .into_owned();
         }
-        if let Some(phone) = &value.phone {
-            phone.validate()?;
-        }
         value.schmooze.validate()?;
         if value.schmooze.model.is_empty() {
             bail!("Translator model is required");
@@ -164,61 +161,59 @@ impl Config {
     }
 }
 
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// The optional `[phone]` table: other ports for the playground's phone page. Older versions
+/// kept a listener address and certificates here; those keys are still accepted, and
+/// ignored, so an existing config keeps loading.
+#[derive(Clone, Default, Deserialize)]
 pub struct PhoneConfig {
-    pub pairing_code_file: Option<String>,
-    pub listen: SocketAddr,
-    pub public_url: String,
-    pub tls_cert: Option<String>,
-    pub tls_key: Option<String>,
-    pub certificate_download_listen: Option<SocketAddr>,
-    pub trust_certificate: Option<String>,
+    /// The phone page's own port on this computer (8796 when not given).
+    pub port: Option<u16>,
+    /// The Tailscale HTTPS port in front of it (8443 when not given).
+    pub https_port: Option<u16>,
 }
-impl PhoneConfig {
-    pub fn validate(&self) -> Result<()> {
-        if self.tls_cert.is_some() != self.tls_key.is_some() {
-            bail!("Phone TLS needs both tls_cert and tls_key");
-        }
-        if self.tls_cert.is_some() && !self.public_url.starts_with("https://") {
-            bail!("Phone TLS requires an HTTPS public_url");
-        }
-        if let Some(address) = self.certificate_download_listen {
-            if self.tls_cert.is_none() || self.trust_certificate.is_none() {
-                bail!("Certificate download listener requires phone TLS and trust_certificate");
-            }
-            if address.ip() != self.listen.ip() || address.port() == self.listen.port() {
-                bail!("Certificate download must use the same private IP and a different port");
-            }
-        }
-        let private = match self.listen.ip() {
-            std::net::IpAddr::V4(ip) => ip.is_private() || ip.is_loopback(),
-            std::net::IpAddr::V6(ip) => ip.is_unique_local() || ip.is_loopback(),
-        };
-        if !private {
-            bail!("Phone listener must bind a private LAN or loopback address");
-        }
-        let url = reqwest::Url::parse(&self.public_url)?;
-        if !matches!(url.scheme(), "http" | "https")
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-            || url.path() != "/"
-        {
-            bail!("Invalid phone public_url; use an HTTP(S) origin without credentials or a path");
-        }
-        if url.scheme() == "http" {
-            let host = url.host_str().unwrap_or_default();
-            let private = host == "localhost"
-                || host.parse::<std::net::IpAddr>().is_ok_and(|ip| match ip {
-                    std::net::IpAddr::V4(ip) => ip.is_private() || ip.is_loopback(),
-                    std::net::IpAddr::V6(ip) => ip.is_unique_local() || ip.is_loopback(),
-                });
-            if !private {
-                bail!("Unencrypted phone links must stay on a private LAN");
-            }
-        }
-        Ok(())
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A config written for an older version (a phone listener with certificates) loads.
+    #[test]
+    fn an_older_phone_table_is_accepted_and_ignored() {
+        let folder = std::env::temp_dir().join(format!("3y-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("config.toml");
+        std::fs::write(
+            &file,
+            r#"
+listen = "127.0.0.1:8793"
+knowledge_path = ""
+default_reasoner = "local"
+[schmooze]
+url = "http://127.0.0.1:11434/v1/chat/completions"
+model = "SCHMOOZE_MODEL_PLACEHOLDER"
+[reasoners.local]
+url = "http://127.0.0.1:11434/v1/chat/completions"
+model = "LOCAL_REASONER_PLACEHOLDER"
+[phone]
+listen = "10.168.168.99:8796"
+public_url = "https://10.168.168.99:8796"
+tls_cert = "/x/phone.pem"
+tls_key = "/x/phone-key.pem"
+certificate_download_listen = "10.168.168.99:8797"
+trust_certificate = "/x/ca.crt"
+pairing_code_file = "/x/pairing-code"
+"#,
+        )
+        .unwrap();
+        let config = Config::load(&file).unwrap();
+        assert!(config.phone.unwrap().port.is_none());
+        std::fs::write(
+            &file,
+            std::fs::read_to_string(&file).unwrap() + "port = 9001\nhttps_port = 10000\n",
+        )
+        .unwrap();
+        let phone = Config::load(&file).unwrap().phone.unwrap();
+        assert_eq!((phone.port, phone.https_port), (Some(9001), Some(10000)));
+        std::fs::remove_dir_all(folder).unwrap();
     }
 }

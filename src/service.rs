@@ -142,21 +142,16 @@ impl App {
         };
         json!({"status":if endpoint.placeholder(){"placeholder"}else{"configured-not-probed"},"model":endpoint.model,"mode":if native{"native-yiddish-chat"}else if self.config.translation.is_some(){"dedicated-translation"}else{"llm-translation"},"quality":if native{"experimental-native-review-pending"}else{"development-baseline"}})
     }
+    /// The phone pairing, for the program that runs the service to close when it stops.
+    pub fn phone_hub(&self) -> crate::phone::PairHub {
+        self.phone.clone()
+    }
     pub fn new(config: Config) -> anyhow::Result<Self> {
         let token = config.token()?;
         let entries = if config.knowledge_path.is_empty() {
             Vec::new()
         } else {
             knowledge::load(&config.knowledge_path)?
-        };
-        let phone = if let Some(path) = config
-            .phone
-            .as_ref()
-            .and_then(|p| p.pairing_code_file.as_ref())
-        {
-            crate::phone::PairHub::from_code_file(std::path::Path::new(path))?
-        } else {
-            crate::phone::PairHub::default()
         };
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -166,7 +161,7 @@ impl App {
             .build()?;
         Ok(Self {
             config,
-            phone,
+            phone: Default::default(),
             entries,
             client,
             token,
@@ -609,34 +604,61 @@ impl App {
         Ok(slot.clone())
     }
 
+    /// Run the installed model on a recording: the answer, and the engine that ran it (read
+    /// afterwards: a graphics card that fails moves the work to the CPU midway).
+    async fn transcribe_on(
+        &self,
+        (version, engine): LoadedEngine,
+        bytes: Vec<u8>,
+    ) -> Result<(Value, &'static str)> {
+        let gpu_ok = self.gpu_ok.clone();
+        let (text, compute) = tokio::task::spawn_blocking(move || {
+            let pcm = crate::asr::decode(bytes)?;
+            let before = engine.compute();
+            let text = engine.transcribe(&pcm);
+            if engine.compute() != before {
+                // First use failed on the GPU and the engine moved to the CPU.
+                gpu_ok.store(false, Ordering::Relaxed);
+            }
+            text.map(|text| (text, engine.compute()))
+        })
+        .await
+        .map_err(|_| Error::upstream("Transcribe engine crashed"))?
+        .map_err(|e| Error::bad(&e.to_string()))?;
+        Ok((
+            json!({"text": text, "language": "yi", "model": format!("3Yiddish-Transcribe {version}")}),
+            compute.name(),
+        ))
+    }
+
+    /// The playground's draft: always our own installed model, even where a transcription
+    /// endpoint is configured (that one answers only when no model is installed). Returns the
+    /// text and what wrote it: `{"name": ..., "engine": "gpu" | "cpu" | "endpoint"}`.
+    pub(crate) async fn draft(&self, bytes: Vec<u8>) -> Result<(String, Value)> {
+        let (answer, engine) = match self
+            .local_engine()
+            .map_err(|e| Error(StatusCode::SERVICE_UNAVAILABLE, e))?
+        {
+            Some(loaded) => self.transcribe_on(loaded, bytes).await?,
+            None => (self.transcribe(bytes).await?, "endpoint"),
+        };
+        Ok((
+            answer["text"].as_str().unwrap_or_default().to_owned(),
+            json!({"name": answer["model"], "engine": engine}),
+        ))
+    }
+
     pub(crate) async fn transcribe(&self, bytes: Vec<u8>) -> Result<Value> {
         if bytes.is_empty() || bytes.len() > MAX_AUDIO {
             return Err(Error::bad("Audio must contain 1 byte..25 MiB"));
         }
         // A configured transcription endpoint wins; otherwise the installed model runs in-process.
-        if self.config.transcribe.is_none() {
-            let engine = self
+        if self.config.transcribe.is_none()
+            && let Some(loaded) = self
                 .local_engine()
-                .map_err(|e| Error(StatusCode::SERVICE_UNAVAILABLE, e))?;
-            if let Some((version, engine)) = engine {
-                let gpu_ok = self.gpu_ok.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    let pcm = crate::asr::decode(bytes)?;
-                    let before = engine.compute();
-                    let text = engine.transcribe(&pcm);
-                    if engine.compute() != before {
-                        // First use failed on the GPU and the engine moved to the CPU.
-                        gpu_ok.store(false, Ordering::Relaxed);
-                    }
-                    text
-                })
-                .await
-                .map_err(|_| Error::upstream("Transcribe engine crashed"))?
-                .map_err(|e| Error::bad(&e.to_string()))?;
-                return Ok(
-                    json!({"text": result, "language": "yi", "model": format!("3Yiddish-Transcribe {version}")}),
-                );
-            }
+                .map_err(|e| Error(StatusCode::SERVICE_UNAVAILABLE, e))?
+        {
+            return Ok(self.transcribe_on(loaded, bytes).await?.0);
         }
         let endpoint = self.config.transcribe.as_ref().ok_or_else(|| {
             Error(
@@ -835,7 +857,7 @@ pub fn router(app: App) -> Router {
         .route("/v1/knowledge/search",get(|State(app):State<App>,Query(query):Query<Search>|async move {validate_text(&query.q)?; Ok::<_,Error>(Json(knowledge::search(&app.entries,&query.q)))}))
         .route("/v1/audio/transcriptions",post(|State(app):State<App>,form:Multipart|async move {let(bytes,_)=audio(form).await?;app.transcribe(bytes).await.map(Json)}))
         .route("/v1/audio/chat",post(|State(app):State<App>,form:Multipart|async move {let(bytes,model)=audio(form).await?;let transcript=app.transcribe(bytes).await?;let text=transcript["text"].as_str().unwrap_or_default();validate_text(text)?;let mut result=app.chat(ChatRequest{model,messages:vec![Message{role:"user".into(),content:text.into()}],max_tokens:None,stream:false}).await?;result["yiddish_engine"]["transcript"]=json!(text);Ok::<_,Error>(Json(result))}))
-        .merge(crate::phone::controller())
+        .merge(crate::phone::controller(app.clone()))
         .route_layer(middleware::from_fn_with_state(app.clone(),protect));
     Router::new()
         .route(
