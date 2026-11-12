@@ -74,6 +74,21 @@ fn version_newer(have: &str, want: &str) -> bool {
     parse(want) > parse(have)
 }
 
+/// A download error in one plain line: no connection is said as such, without the chain of
+/// causes underneath it.
+pub fn plain_error(error: &anyhow::Error) -> String {
+    let offline = error.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|e| e.is_connect() || e.is_timeout())
+    });
+    if offline {
+        "No internet connection; try again later.".into()
+    } else {
+        format!("{error:#}")
+    }
+}
+
 /// The version the GitHub model index currently names.
 pub fn latest_version() -> Result<String> {
     let manifest: Manifest = serde_json::from_reader(http_get(&index_url())?.take(1024 * 1024))?;
@@ -165,7 +180,7 @@ fn write_atomic(path: &Path, text: &str) -> Result<()> {
     Ok(())
 }
 
-fn sha256_file(path: &Path) -> Result<String> {
+pub(crate) fn sha256_file(path: &Path) -> Result<String> {
     let mut f = std::fs::File::open(path)?;
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
@@ -193,7 +208,12 @@ fn http_get(url: &str) -> Result<Box<dyn Read + Send>> {
 }
 
 /// Download with resume: continues a `.part` file with an HTTP Range request.
-fn download(url: &str, part: &Path, size: u64, progress: &mut dyn FnMut(u64)) -> Result<()> {
+pub(crate) fn download(
+    url: &str,
+    part: &Path,
+    size: u64,
+    progress: &mut dyn FnMut(u64),
+) -> Result<()> {
     let have = std::fs::metadata(part).map(|m| m.len()).unwrap_or(0);
     if have > size {
         std::fs::remove_file(part)?;

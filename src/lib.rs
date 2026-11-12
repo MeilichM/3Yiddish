@@ -4,6 +4,7 @@ pub mod audio;
 pub mod config;
 pub mod dictate;
 pub mod eval;
+pub mod font;
 pub mod knowledge;
 pub mod model;
 pub mod paths;

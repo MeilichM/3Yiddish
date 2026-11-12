@@ -88,6 +88,8 @@ enum Command {
     },
     /// Update 3Yiddish itself to the latest release.
     Update,
+    /// Termux on a phone: get a font in which Yiddish letters are drawn properly.
+    Font,
     /// Score the installed (or given) model on a test set: gold.json [{n, gold, audio}].
     Bench {
         gold: PathBuf,
@@ -155,8 +157,23 @@ async fn main() -> Result<()> {
         // Runs on the main thread: macOS needs the keyboard listener there.
         return three_yiddish::dictate::run(key, &cli.server);
     }
+    if matches!(cli.command, Command::Font) {
+        if !three_yiddish::font::termux() {
+            println!("This is for Termux on a phone; here the terminal's own font is used.");
+            return Ok(());
+        }
+        tokio::task::spawn_blocking(|| three_yiddish::font::install(&mut |_, _| {}))
+            .await?
+            .map_err(online)?;
+        println!("The font is in place. To undo:");
+        println!("  {}", three_yiddish::font::UNDO);
+        return Ok(());
+    }
     if matches!(cli.command, Command::Update) {
-        match tokio::task::spawn_blocking(three_yiddish::update::update).await?? {
+        match tokio::task::spawn_blocking(three_yiddish::update::update)
+            .await?
+            .map_err(online)?
+        {
             Some(version) => {
                 println!("Updated to 3Yiddish {version}. Restart it to use the new version.")
             }
@@ -230,17 +247,30 @@ async fn main() -> Result<()> {
     if let Command::Model { action } = &cli.command {
         match action {
             ModelAction::Pull => {
-                let mut last = 0u64;
+                let (mut last, mut file) = (0u64, String::new());
                 let version = tokio::task::spawn_blocking(move || {
                     three_yiddish::model::pull(&models, &mut |name, done, total| {
                         let pct = done * 100 / total.max(1);
+                        // Each file gets its own line (the next one's name may be shorter).
+                        if file != name {
+                            if !file.is_empty() {
+                                eprintln!();
+                            }
+                            file = name.to_owned();
+                            last = u64::MAX;
+                        }
                         if pct != last {
                             last = pct;
                             eprint!("\r{name}: {pct}%   ");
                         }
                     })
                 })
-                .await??;
+                .await?
+                .map_err(|error| {
+                    // End the progress line before the error.
+                    eprintln!();
+                    online(error)
+                })?;
                 eprintln!();
                 println!("Transcribe model {version} is installed and active.");
             }
@@ -306,7 +336,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     if matches!(cli.command, Command::Serve) {
-        return serve(Config::load_or_default(&cli.config)?).await;
+        return serve(Config::load_or_default(&cli.config)?, true).await;
     }
     let url = reqwest::Url::parse(&cli.server)?;
     if !matches!(url.scheme(), "http" | "https")
@@ -341,6 +371,7 @@ async fn main() -> Result<()> {
         | Command::Eval { .. }
         | Command::Model { .. }
         | Command::Update
+        | Command::Font
         | Command::Dictate { .. }
         | Command::Bench { .. } => unreachable!(),
         Command::Tui { watch } => {
@@ -353,7 +384,7 @@ async fn main() -> Result<()> {
             {
                 let config = Config::load_or_default(&cli.config)?;
                 tokio::spawn(async move {
-                    if let Err(error) = serve(config).await {
+                    if let Err(error) = serve(config, false).await {
                         eprintln!("3Yiddish service stopped: {error}");
                     }
                 });
@@ -537,9 +568,15 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// A download that failed, said in one line (see `model::plain_error`).
+fn online(error: anyhow::Error) -> anyhow::Error {
+    anyhow::anyhow!(three_yiddish::model::plain_error(&error))
+}
+
 /// The HTTP API (plus the phone gateway when configured). `3yiddish serve` runs it in the
-/// foreground; the TUI starts it in the background when nothing is listening yet.
-async fn serve(config: Config) -> Result<()> {
+/// foreground (and says where it listens); the TUI starts it in the background when nothing
+/// is listening yet.
+async fn serve(config: Config, announce: bool) -> Result<()> {
     let listen = config.listen;
     let phone_config = config.phone.clone();
     let app = App::new(config)?;
@@ -614,7 +651,11 @@ async fn serve(config: Config) -> Result<()> {
             }
         });
     }
-    eprintln!("3Yiddish listening on {listen}; request content and credentials are not logged");
+    // Inside the app the screen is about to take over the terminal; a line printed here would
+    // be left on it.
+    if announce {
+        eprintln!("3Yiddish listening on {listen}; request content and credentials are not logged");
+    }
     axum::serve(listener, router(app))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;

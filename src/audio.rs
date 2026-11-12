@@ -27,6 +27,11 @@ mod native {
     /// The longest to wait after Stop for audio still on its way from the system.
     const MAX_WAIT_MS: u64 = 4000;
 
+    /// The microphone's loudness is known while recording (for the live wave).
+    pub const LIVE_LEVEL: bool = true;
+    /// Playback can pause where it is and jump to another moment.
+    pub const SEEKS: bool = true;
+
     pub struct Recorder {
         stop: Arc<AtomicBool>,
         thread: Option<JoinHandle<(Vec<f32>, u32, u16)>>,
@@ -338,56 +343,148 @@ mod termux {
     use std::{
         path::{Path, PathBuf},
         process::{Child, Command, Stdio},
-        time::Instant,
+        sync::{Arc, Mutex},
+        thread::JoinHandle,
+        time::{Duration, Instant},
     };
 
-    const NEEDS_API: &str =
-        "Install the Termux:API app, then run: pkg install termux-api (and allow the microphone)";
+    /// The commands are missing: the `termux-api` package is not installed.
+    pub const NEEDS_PACKAGE: &str = "Run: pkg install termux-api";
+    /// The commands are there but nobody answers them: the Termux:API app is not installed.
+    pub const NEEDS_APP: &str = "Install the Termux:API app first.";
+    const NEEDS_MICROPHONE: &str = "Allow the microphone, then tap again.";
+    /// The phone's recorder says nothing about loudness until the take is finished.
+    pub const LIVE_LEVEL: bool = false;
+    /// The phone's player only plays a file from its start.
+    pub const SEEKS: bool = false;
 
-    fn termux(program: &str, args: &[&str]) -> Result<std::process::Output> {
-        Command::new(program)
+    /// Run one Termux:API command and return what it printed. Without the Termux:API app
+    /// these commands wait forever, so each gets `seconds` and is then stopped. Never call
+    /// this from the thread that draws the screen.
+    pub fn termux(
+        program: &str,
+        args: &[&str],
+        input: Option<&str>,
+        seconds: u64,
+    ) -> Result<String> {
+        use std::io::{Read, Write};
+        use std::os::unix::process::CommandExt;
+        let mut child = Command::new(program)
             .args(args)
-            .stdin(Stdio::null())
-            .output()
-            .context(NEEDS_API)
+            // Its own process group: the command is a script that starts a helper, and the
+            // helper is the one left waiting, so giving up has to stop both.
+            .process_group(0)
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .context(NEEDS_PACKAGE)?;
+        if let (Some(text), Some(mut pipe)) = (input, child.stdin.take()) {
+            let _ = pipe.write_all(text.as_bytes());
+        }
+        let deadline = Instant::now() + Duration::from_secs(seconds);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(40));
+                }
+                _ => {
+                    // SAFETY: signals the group made above, by its own id.
+                    unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    bail!(NEEDS_APP);
+                }
+            }
+        }
+        let mut said = String::new();
+        if let Some(mut out) = child.stdout.take() {
+            let _ = out.read_to_string(&mut said);
+        }
+        Ok(said)
+    }
+
+    /// What a Termux:API command's answer means when it is an error.
+    fn refusal(said: &str) -> Option<&'static str> {
+        let said = said.to_lowercase();
+        if said.contains("permission") || said.contains("denied") {
+            Some(NEEDS_MICROPHONE)
+        } else if said.contains("error") {
+            Some("The microphone did not start.")
+        } else {
+            None
+        }
+    }
+
+    fn begin(path: &Path) -> Result<()> {
+        let limit = MAX_SECONDS.to_string();
+        let file = path.to_string_lossy();
+        let args = ["-e", "aac", "-l", limit.as_str(), "-f", &*file];
+        // A phone that has put the Termux:API app to sleep takes a moment to wake it.
+        let started = termux("termux-microphone-record", &args, None, 6);
+        if started.is_err() {
+            // Should the answer only have been late, nothing is left recording.
+            let _ = termux("termux-microphone-record", &["-q"], None, 2);
+        }
+        let mut said = started?;
+        if said.to_lowercase().contains("already") {
+            // A take left running by an earlier crash: end it and start over.
+            let _ = termux("termux-microphone-record", &["-q"], None, 5);
+            said = termux("termux-microphone-record", &args, None, 6)?;
+        }
+        match refusal(&said) {
+            Some(why) => bail!(why),
+            None => Ok(()),
+        }
     }
 
     pub struct Recorder {
         path: PathBuf,
         started: Instant,
-        failure: Option<String>,
+        failure: Arc<Mutex<Option<String>>>,
+        /// Asking the phone to start, on its own thread so the screen never waits for it.
+        starting: Option<JoinHandle<()>>,
     }
 
     impl Recorder {
-        /// Same as `start`, but a failure is reported through `failed()`.
+        /// Start without waiting: the screen flips to recording at once. Ask `failed()` later.
         pub fn start_now() -> Self {
-            Self::start().unwrap_or_else(|e| Self {
-                path: PathBuf::new(),
+            let failure = Arc::new(Mutex::new(None));
+            let path = std::path::absolute(format!("state/.take-{}.m4a", uuid::Uuid::new_v4()))
+                .unwrap_or_default();
+            let (told, file) = (failure.clone(), path.clone());
+            let starting = std::thread::spawn(move || {
+                if let Err(error) = begin(&file) {
+                    *told.lock().unwrap() = Some(error.to_string());
+                }
+            });
+            Self {
+                path,
                 started: Instant::now(),
-                failure: Some(e.to_string()),
-            })
+                failure,
+                starting: Some(starting),
+            }
         }
 
         pub fn failed(&mut self) -> Option<String> {
-            self.failure.clone()
+            self.failure.lock().unwrap().clone()
         }
 
+        /// Start and wait for the phone's answer.
         pub fn start() -> Result<Self> {
-            let path = std::path::absolute(format!("state/.take-{}.m4a", uuid::Uuid::new_v4()))?;
-            let limit = MAX_SECONDS.to_string();
-            let out = termux(
-                "termux-microphone-record",
-                &["-e", "aac", "-l", &limit, "-f", &path.to_string_lossy()],
-            )?;
-            let said = String::from_utf8_lossy(&out.stdout).to_lowercase();
-            if !out.status.success() || said.contains("error") || said.contains("denied") {
-                bail!("The microphone did not start. {NEEDS_API}");
+            let mut recorder = Self::start_now();
+            if let Some(thread) = recorder.starting.take() {
+                let _ = thread.join();
             }
-            Ok(Self {
-                path,
-                started: Instant::now(),
-                failure: None,
-            })
+            match recorder.failed() {
+                Some(why) => bail!(why),
+                None => Ok(recorder),
+            }
         }
 
         /// No live level from the phone's recorder.
@@ -399,64 +496,105 @@ mod termux {
             self.started.elapsed().as_secs() >= MAX_SECONDS as u64
         }
 
-        pub fn stop(self) -> Result<Vec<f32>> {
-            let _ = termux("termux-microphone-record", &["-q"]);
+        /// End the take and decode it. Waits for the phone, so call it off the screen thread.
+        pub fn stop(mut self) -> Result<Vec<f32>> {
+            if let Some(thread) = self.starting.take() {
+                let _ = thread.join();
+            }
+            if let Some(why) = self.failed() {
+                bail!(why);
+            }
+            termux("termux-microphone-record", &["-q"], None, 5)?;
             // The recorder closes the file a moment after it is told to stop.
-            let mut bytes = Vec::new();
-            for _ in 0..20 {
-                std::thread::sleep(std::time::Duration::from_millis(150));
-                if let Ok(b) = std::fs::read(&self.path)
-                    && !b.is_empty()
-                    && crate::asr::decode(b.clone()).is_ok()
+            let mut heard = None;
+            for _ in 0..25 {
+                std::thread::sleep(Duration::from_millis(120));
+                if let Ok(bytes) = std::fs::read(&self.path)
+                    && !bytes.is_empty()
+                    && let Ok(pcm) = crate::asr::decode(bytes)
+                    && !pcm.is_empty()
                 {
-                    bytes = b;
+                    heard = Some(pcm);
                     break;
                 }
             }
             let _ = std::fs::remove_file(&self.path);
-            if bytes.is_empty() {
-                bail!("The recording came back empty. {NEEDS_API}");
-            }
-            crate::asr::decode(bytes)
+            // Nothing more to stop when this is dropped.
+            self.path = PathBuf::new();
+            heard.context("The recording came back empty; try again.")
         }
     }
 
     impl Drop for Recorder {
         fn drop(&mut self) {
-            let _ = Command::new("termux-microphone-record")
-                .arg("-q")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            // Dropped without `stop` (the app is closing, or the start failed): end the take
+            // in the background, never on the screen thread.
+            if self.path.as_os_str().is_empty() || self.failure.lock().unwrap().is_some() {
+                return;
+            }
+            let (starting, path) = (self.starting.take(), self.path.clone());
+            std::thread::spawn(move || {
+                if let Some(thread) = starting {
+                    let _ = thread.join();
+                }
+                let _ = termux("termux-microphone-record", &["-q"], None, 5);
+                let _ = std::fs::remove_file(path);
+            });
         }
     }
 
-    /// Plays through the `play-audio` package (pkg install play-audio).
-    pub struct Playback(Child);
+    /// Plays through the `play-audio` package (pkg install play-audio). It can only play a
+    /// file from its start: pausing stops it, and going on starts it over.
+    pub struct Playback {
+        path: PathBuf,
+        /// None while paused.
+        player: Mutex<Option<Child>>,
+    }
+
+    fn play(path: &Path) -> Result<Child> {
+        Command::new("play-audio")
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("To listen back, run: pkg install play-audio")
+    }
 
     impl Playback {
         pub fn start(path: &Path) -> Result<Self> {
-            Ok(Self(
-                Command::new("play-audio")
-                    .arg(path)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()
-                    .context("To listen back, run: pkg install play-audio")?,
-            ))
+            Ok(Self {
+                path: path.to_owned(),
+                player: Mutex::new(Some(play(path)?)),
+            })
         }
         pub fn seconds(&self) -> Option<f32> {
             None
         }
-        pub fn set_paused(&self, _paused: bool) {}
+        pub fn set_paused(&self, paused: bool) {
+            let mut player = self.player.lock().unwrap();
+            if paused {
+                if let Some(mut child) = player.take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            } else if player.is_none() {
+                *player = play(&self.path).ok();
+            }
+        }
         pub fn seek(&self, _seconds: f32) {}
         pub fn done(&mut self) -> bool {
-            self.0.try_wait().ok().flatten().is_some()
+            // Paused is not finished.
+            match self.player.lock().unwrap().as_mut() {
+                Some(child) => child.try_wait().ok().flatten().is_some(),
+                None => false,
+            }
         }
         pub fn stop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
+            if let Some(mut child) = self.player.lock().unwrap().take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
         }
     }
 

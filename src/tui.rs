@@ -78,8 +78,15 @@ enum Update {
     Upgrade(String, bool),
     /// An audio file chosen with the attach button (None: cancelled or no picker).
     Picked(Option<String>),
-    /// A finished take: its file and length in seconds, or why it failed.
-    Recorded(PathBuf, Result<f32, String>),
+    /// A finished take: its file, length in seconds and loudness over time (for the voice
+    /// note's wave where the microphone gave no live level), or why it failed.
+    Recorded(PathBuf, Result<(f32, Vec<f32>), String>),
+    /// A download that did not finish: its button comes back, to try again (the model's
+    /// label, or None for the font).
+    Again(Option<String>),
+    /// A one-line alert found out in the background.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    Notice(String),
     /// The service's answer to an engine switch: its new `compute` object.
     Compute(Result<Value, String>),
 }
@@ -184,6 +191,10 @@ fn voice_toggle(state: &mut Screen, index: usize) {
         if play.paused {
             play.started = std::time::Instant::now();
             play.paused = false;
+            if !crate::audio::SEEKS {
+                // A phone's player starts the file over.
+                play.offset = 0.0;
+            }
         } else {
             play.offset = play.position();
             play.paused = true;
@@ -198,6 +209,11 @@ fn voice_toggle(state: &mut Screen, index: usize) {
 fn voice_seek(state: &mut Screen, index: usize, permille: u16) {
     let seconds = state.voices.get(&index).map_or(0.0, |v| v.seconds);
     let target = seconds * permille as f32 / 1000.0;
+    if !crate::audio::SEEKS {
+        // A phone's player cannot jump: a tap on the wave plays from the start.
+        voice_start(state, index, 0.0);
+        return;
+    }
     if let Some(play) = state.voice_play.as_mut().filter(|p| p.index == index) {
         play.offset = target;
         play.started = std::time::Instant::now();
@@ -277,6 +293,8 @@ struct Screen {
     /// Updates found at startup (app version, model label) and whether one is running.
     app_update: Option<String>,
     model_update: Option<String>,
+    /// Termux with the phone's own font: offer the font in which Yiddish letters read well.
+    font_offer: bool,
     upgrading: bool,
     /// First tap on "Delete temp recordings" arms it; the second deletes.
     delete_armed: bool,
@@ -335,6 +353,12 @@ struct Resume {
     read_result: Option<Value>,
     #[serde(default)]
     read_history: Vec<String>,
+    /// The regular app's chat: (sent by the user, text) for each message.
+    #[serde(default)]
+    plain_log: Vec<(bool, String)>,
+    /// Its voice notes: (message number, file, seconds, wave).
+    #[serde(default)]
+    voices: Vec<(usize, PathBuf, f32, Vec<u8>)>,
 }
 impl Resume {
     fn capture(s: &Screen) -> Self {
@@ -358,6 +382,12 @@ impl Resume {
             read_pending: s.read_pending.clone(),
             read_result: s.read_result.clone(),
             read_history: s.read_history.clone(),
+            plain_log: s.plain_log.clone(),
+            voices: s
+                .voices
+                .iter()
+                .map(|(index, v)| (*index, v.path.clone(), v.seconds, v.peaks.clone()))
+                .collect(),
         }
     }
     fn apply(self, s: &mut Screen) {
@@ -382,6 +412,21 @@ impl Resume {
         s.read_line = self.read_line;
         s.read_pending = self.read_pending;
         s.read_result = self.read_result;
+        s.plain_log = self.plain_log;
+        s.voices = self
+            .voices
+            .into_iter()
+            .map(|(index, path, seconds, peaks)| {
+                (
+                    index,
+                    Voice {
+                        path,
+                        seconds,
+                        peaks,
+                    },
+                )
+            })
+            .collect();
         s.read_history = self.read_history;
     }
     fn save(&self) -> Result<PathBuf> {
@@ -469,7 +514,12 @@ fn finish_recording(state: &mut Screen, tx: &mpsc::UnboundedSender<Update>) {
                 options.mode(0o600);
             }
             std::io::Write::write_all(&mut options.open(&path)?, &crate::asr::wav(&pcm)?)?;
-            Ok(pcm.len() as f32 / 16_000.0)
+            // Loudness twenty times a second, like the live level while recording.
+            let levels = pcm
+                .chunks(800)
+                .map(|c| c.iter().fold(0.0f32, |p, v| p.max(v.abs())))
+                .collect();
+            Ok((pcm.len() as f32 / 16_000.0, levels))
         });
         let _ = tx.send(Update::Recorded(path, saved.map_err(|e| e.to_string())));
     });
@@ -504,6 +554,14 @@ impl Drop for Restore {
             DisableMouseCapture,
             DisableBracketedPaste
         );
+        // Closing with a click or a tap: the button's release is still on its way, and
+        // would be typed into the shell as stray characters. Take in what arrives shortly.
+        let until = std::time::Instant::now() + Duration::from_millis(250);
+        while std::time::Instant::now() < until {
+            if event::poll(Duration::from_millis(60)).unwrap_or(false) {
+                let _ = event::read();
+            }
+        }
         ratatui::restore();
     }
 }
@@ -1058,6 +1116,7 @@ enum Click {
     Restart,
     UpdateApp,
     UpdateModel,
+    GetFont,
     DeleteTemp,
     ReadList,
     Pick(usize),
@@ -2873,6 +2932,8 @@ fn terminal(
     quiet_stderr();
     let mut terminal = ratatui::init();
     let _restore = Restore;
+    // Whatever was on the screen before (a terminal left in a half state) goes.
+    terminal.clear()?;
     // Before mouse reporting starts, so nothing else arrives in the terminal's answers.
     init_graphics();
     crossterm::execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
@@ -2883,16 +2944,14 @@ fn terminal(
             .ok()
             .filter(|v| crate::update::newer(env!("CARGO_PKG_VERSION"), v));
         let have = crate::model::current(&crate::paths::models()).map(|(v, ..)| v);
-        let model = crate::model::latest_version()
-            .ok()
-            .filter(|v| have.as_ref() != Some(v))
-            .map(|v| {
-                if have.is_none() {
-                    "first".to_owned()
-                } else {
-                    v
-                }
-            });
+        // Without a model the button to get one shows even offline (it then says so).
+        let model = if have.is_none() {
+            Some("first".to_owned())
+        } else {
+            crate::model::latest_version()
+                .ok()
+                .filter(|v| have.as_ref() != Some(v))
+        };
         let _ = tx.send(Update::Available(app, model));
     });
     LAB.store(
@@ -2919,6 +2978,7 @@ fn terminal(
         }
     }
     state.lab = lab();
+    state.font_offer = crate::font::wanted();
     if hidden(state.tab) {
         state.tab = next_tab(state.tab, 1);
     }
@@ -3013,6 +3073,8 @@ fn terminal(
                 }
                 Update::Upgrade(text, finished) => {
                     state.notice = text;
+                    // The same words again (a second try) stay up for their full time.
+                    state.notice_since = None;
                     if finished {
                         state.upgrading = false;
                     }
@@ -3074,21 +3136,47 @@ fn terminal(
                 Update::Recorded(path, result) => {
                     state.busy = false;
                     match result {
-                        Ok(seconds) => {
+                        Ok((seconds, levels)) => {
                             if let Some(voice) = state.voices.values_mut().find(|v| v.path == path)
                             {
                                 voice.seconds = seconds;
+                                // No live level came from the microphone (a phone): the
+                                // wave is drawn from the finished take.
+                                if voice.peaks.iter().all(|p| *p == 0) {
+                                    voice.peaks = peaks(&levels);
+                                }
                             }
                             state.input = path.to_string_lossy().into_owned();
                             state.audio_path = Some(path);
                             submit_reading(&mut state, &actions)?;
                         }
                         Err(error) => {
-                            state.notice = format!("Microphone recording failed: {error}");
+                            // The take never became a voice note: take its empty bubble away.
+                            if let Some(index) = state
+                                .voices
+                                .iter()
+                                .find(|(_, v)| v.path == path)
+                                .map(|(index, _)| *index)
+                                && index + 1 == state.plain_log.len()
+                            {
+                                state.voices.remove(&index);
+                                state.plain_log.pop();
+                            }
+                            state.notice = if termux() {
+                                error
+                            } else {
+                                format!("Microphone recording failed: {error}")
+                            };
                             state.read_pending = None;
                         }
                     }
                 }
+                Update::Notice(text) => {
+                    state.notice = text;
+                    state.notice_since = None;
+                }
+                Update::Again(Some(label)) => state.model_update = Some(label),
+                Update::Again(None) => state.font_offer = crate::font::wanted(),
                 Update::Picked(path) => {
                     if let Some(path) = path {
                         state.input = path;
@@ -3162,7 +3250,11 @@ fn terminal(
                             if tab == 1 {
                                 state.read_pending = None;
                             }
-                            state.notice = format!("Request failed: {error}");
+                            state.notice = if plain(&state) {
+                                plain_alert(&error)
+                            } else {
+                                format!("Request failed: {error}")
+                            };
                             if tab != 0 {
                                 state.outputs[tab] = state.notice.clone();
                             }
@@ -3178,6 +3270,7 @@ fn terminal(
             state.recording_path = None;
             state.read_pending = None;
             state.notice = error;
+            state.notice_since = None;
         }
         // The recording hit its time limit by itself.
         if state.recording.as_ref().is_some_and(|r| r.finished()) {
@@ -3368,7 +3461,7 @@ fn terminal(
                             }
                             Click::CopyAt(index) => {
                                 if let Some((_, text)) = state.plain_log.get(index).cloned() {
-                                    copy_text(&mut state, &text);
+                                    copy_text(&mut state, &text, &eval_tx);
                                     state.copied = Some((index, std::time::Instant::now()));
                                 }
                                 continue;
@@ -3420,7 +3513,7 @@ fn terminal(
                                             format!("Updated to {v}. Click Refresh to start it.")
                                         }
                                         Ok(None) => "Already up to date.".into(),
-                                        Err(e) => format!("Update failed: {e}"),
+                                        Err(e) => crate::model::plain_error(&e),
                                     };
                                     let _ = tx.send(Update::Upgrade(text, true));
                                 });
@@ -3430,6 +3523,7 @@ fn terminal(
                             Click::UpdateModel => {
                                 state.upgrading = true;
                                 let tx = eval_tx.clone();
+                                let label = state.model_update.take();
                                 std::thread::spawn(move || {
                                     let mut last = 101;
                                     let result = crate::model::pull(
@@ -3447,11 +3541,42 @@ fn terminal(
                                     );
                                     let text = match result {
                                         Ok(v) => format!("Model {v} is installed and active."),
-                                        Err(e) => format!("Model download failed: {e}"),
+                                        Err(e) => {
+                                            let _ = tx.send(Update::Again(label));
+                                            crate::model::plain_error(&e)
+                                        }
                                     };
                                     let _ = tx.send(Update::Upgrade(text, true));
                                 });
-                                state.model_update = None;
+                                continue;
+                            }
+                            Click::GetFont => {
+                                state.upgrading = true;
+                                state.font_offer = false;
+                                let tx = eval_tx.clone();
+                                std::thread::spawn(move || {
+                                    let mut last = 101;
+                                    let result = crate::font::install(&mut |done, total| {
+                                        let pct = done * 100 / total.max(1);
+                                        if pct != last {
+                                            last = pct;
+                                            let _ = tx.send(Update::Upgrade(
+                                                format!("Getting the font: {pct}%"),
+                                                false,
+                                            ));
+                                        }
+                                    });
+                                    // The buttons follow the new font from the next frame.
+                                    NERD.store(0, std::sync::atomic::Ordering::Relaxed);
+                                    let text = match result {
+                                        Ok(()) => "The font is in place.".to_owned(),
+                                        Err(e) => {
+                                            let _ = tx.send(Update::Again(None));
+                                            crate::model::plain_error(&e)
+                                        }
+                                    };
+                                    let _ = tx.send(Update::Upgrade(text, true));
+                                });
                                 continue;
                             }
                             Click::Back => {
@@ -3910,6 +4035,19 @@ fn quiet_stderr() {
         }
     }
 }
+/// A failed request as the regular app says it: what went wrong in a few words, without
+/// the status code in front, and short enough for a phone's width.
+fn plain_alert(error: &str) -> String {
+    let said = match error.strip_prefix("HTTP ") {
+        Some(rest) => rest.split_once(": ").map_or(rest, |(_, said)| said),
+        None => error,
+    };
+    if said.starts_with("No Transcribe model yet") {
+        "No model yet: use Get model first.".into()
+    } else {
+        said.to_owned()
+    }
+}
 /// The regular app: one centered column. Logo on top, transcripts as message cards, and a
 /// typing box at the bottom with square buttons on both sides (attach left, record/send right).
 fn plain(state: &Screen) -> bool {
@@ -3932,9 +4070,12 @@ fn noise(a: u64, b: u64) -> u64 {
 /// slightly brighter faster one up close, all very faint. The wallpaper shows between.
 fn draw_rain(frame: &mut Frame, area: Rect) {
     const LETTERS: [char; 22] = [
-        'א', 'ב', 'ג', 'ד', 'ה', 'ו', 'ז', 'ח', 'ט', 'י', 'כ', 'ל', 'מ', 'נ', 'ס', 'ע', 'פ', 'צ',
-        'ק', 'ר', 'ש', 'ת',
+        'א', 'ב', 'ג', 'ד', 'ה', 'ח', 'ט', 'כ', 'ל', 'מ', 'נ', 'ס', 'ע', 'פ', 'צ', 'ק', 'ר', 'ש',
+        'ת', 'ו', 'ז', 'י',
     ];
+    // Termux stretches a letter narrower than its cell to fill it, which turns the three
+    // slim ones (at the end of the list) into blobs with the phone's own font.
+    let letters = if outline() { 19 } else { 22 };
     let t = started().elapsed().as_secs_f32();
     let (accent, _) = theme_rgb();
     let height = area.height as f32;
@@ -3969,8 +4110,8 @@ fn draw_rain(frame: &mut Frame, area: Rect) {
                 }
                 // Letters flicker now and then, slower further up the trail.
                 let tick = (t * 2.5) as u64 / (1 + k);
-                let letter =
-                    LETTERS[(noise(column as u64 * 977 + row as u64, tick + layer) % 22) as usize];
+                let letter = LETTERS
+                    [(noise(column as u64 * 977 + row as u64, tick + layer) % letters) as usize];
                 // A narrow band of mid tones: never bright, never black, so the letters sit
                 // quietly on light and dark wallpaper alike.
                 let fade = bright * (0.8 + 0.2 * (1.0 - k as f32 / trail as f32));
@@ -4008,9 +4149,19 @@ thread_local! {
 /// draws the same shapes from characters.
 fn init_graphics() {
     use ratatui_image::picker::{Picker, ProtocolType};
-    let (accent, record, dark) =
-        theme_colors().unwrap_or(([107, 224, 211], [255, 119, 143], [29, 39, 52]));
+    // Termux tells its background but not its palette: its own blue and red stand in, so the
+    // falling letters match the buttons.
+    let (accent, record, dark) = theme_colors().unwrap_or(if termux() {
+        ([92, 92, 255], [255, 0, 0], [29, 39, 52])
+    } else {
+        ([107, 224, 211], [255, 119, 143], [29, 39, 52])
+    });
     THEME.with(|t| t.set((accent, record, dark)));
+    PHONE_LOOK.with(|o| o.set(termux()));
+    if termux() {
+        // Termux draws no pictures, and it answers none of the picture questions.
+        return;
+    }
     let Ok(picker) = Picker::from_query_stdio() else {
         return;
     };
@@ -4041,31 +4192,57 @@ fn surface() -> Color {
     Color::Rgb(s[0], s[1], s[2])
 }
 /// The terminal theme's blue and red (ANSI 4 and 1), and a surface color one step off its
-/// background, asked over the terminal itself. The
-/// device-attributes request at the end is always answered, so the read cannot hang on a
-/// terminal that ignores the color question.
+/// background, asked over the terminal itself. The device-attributes request at the end is
+/// answered by every terminal that ignores the color question, and the wait has a deadline
+/// for one that answers nothing.
 #[cfg(unix)]
 fn theme_colors() -> Option<([u8; 3], [u8; 3], [u8; 3])> {
-    use std::io::{Read, Write};
+    use std::io::Write;
     let mut out = std::io::stdout();
     out.write_all(b"\x1b]4;4;?\x07\x1b]4;1;?\x07\x1b]11;?\x07\x1b[c")
         .ok()?;
     out.flush().ok()?;
+    parse_theme(&read_reply(libc::STDIN_FILENO, Duration::from_secs(1))?)
+}
+/// The terminal's answer up to the end of its device-attributes reply (ESC [ ? ... c), read
+/// one byte at a time straight from the descriptor, so nothing after it is taken (the next
+/// bytes are the user's keys). None when the answer does not come within `limit`: a terminal
+/// that answers nothing must not hold up the start.
+#[cfg(unix)]
+fn read_reply(fd: std::os::fd::RawFd, limit: Duration) -> Option<String> {
+    let deadline = std::time::Instant::now() + limit;
     let mut reply = Vec::new();
-    let mut stdin = std::io::stdin().lock();
-    let mut byte = [0u8; 1];
-    // Ends with the attributes answer: ESC [ ? ... c
     while reply.len() < 512 {
-        stdin.read_exact(&mut byte).ok()?;
-        reply.push(byte[0]);
-        if byte[0] == b'c' && reply.iter().rev().take(40).any(|b| *b == b'[') {
-            let tail = String::from_utf8_lossy(&reply);
-            if tail.rfind("\x1b[?").is_some() {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let mut waiting = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd, for the time that is left.
+        if unsafe { libc::poll(&mut waiting, 1, left.as_millis() as libc::c_int) } <= 0 {
+            return None;
+        }
+        let mut byte = 0u8;
+        // SAFETY: reads at most one byte into `byte`.
+        if unsafe { libc::read(fd, (&raw mut byte).cast(), 1) } != 1 {
+            return None;
+        }
+        reply.push(byte);
+        if byte == b'c' {
+            let text = String::from_utf8_lossy(&reply);
+            if text.rfind("\x1b[?").is_some_and(|at| {
+                !text[at + 3..text.len() - 1].contains(|c: char| c.is_alphabetic())
+            }) {
                 break;
             }
         }
     }
-    let text = String::from_utf8_lossy(&reply);
+    Some(String::from_utf8_lossy(&reply).into_owned())
+}
+/// Accent, red and surface out of the terminal's answer. None unless it told all three.
+#[cfg(unix)]
+fn parse_theme(text: &str) -> Option<([u8; 3], [u8; 3], [u8; 3])> {
     let color = |index: u8| -> Option<[u8; 3]> {
         let start = text.find(&format!("]4;{index};rgb:"))? + format!("]4;{index};rgb:").len();
         let mut parts = text[start..].split(|c: char| !c.is_ascii_hexdigit());
@@ -4330,13 +4507,82 @@ fn pill_caps(frame: &mut Frame, x: u16, right: u16, row: u16, fill: Color) {
 /// Is the system's monospace font a Nerd Font (so its icon glyphs can be used)? Asked once
 /// from fontconfig; anywhere that cannot be told, plain Unicode symbols are used.
 fn nerd_font() -> bool {
-    static NERD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *NERD.get_or_init(|| {
-        std::process::Command::new("fc-match")
-            .arg("monospace")
-            .output()
-            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("Nerd"))
-    })
+    use std::sync::atomic::Ordering;
+    if let Some(told) = NERD_FOR_TEST.with(|n| n.get()) {
+        return told;
+    }
+    match NERD.load(Ordering::Relaxed) {
+        0 => {
+            let nerd = if termux() {
+                // Termux has no fontconfig: its font is the file in ~/.termux (the one "Get
+                // font" puts there is a Nerd Font), or the phone's own when there is none.
+                std::env::var_os("HOME")
+                    .and_then(|home| std::fs::read(Path::new(&home).join(".termux/font.ttf")).ok())
+                    .is_some_and(|font| names_nerd_font(&font))
+            } else {
+                std::process::Command::new("fc-match")
+                    .arg("monospace")
+                    .output()
+                    .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("Nerd"))
+            };
+            NERD.store(if nerd { 2 } else { 1 }, Ordering::Relaxed);
+            nerd
+        }
+        known => known == 2,
+    }
+}
+/// What `nerd_font` found: 0 not asked yet, 1 no, 2 yes. Set back to 0 when the font changes
+/// under the app ("Get font"), so the next frame asks again.
+static NERD: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+thread_local! {
+    /// Tests draw each look whatever font this machine has.
+    static NERD_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+/// Does this font file call itself a Nerd Font? Its name is stored as plain bytes or as
+/// two-byte characters, depending on the font.
+fn names_nerd_font(font: &[u8]) -> bool {
+    let wide: Vec<u8> = "Nerd Font".bytes().flat_map(|b| [0, b]).collect();
+    font.windows(9).any(|w| w == b"Nerd Font") || font.windows(wide.len()).any(|w| w == wide)
+}
+use crate::font::termux;
+thread_local! {
+    /// In Termux, shapes are drawn as round outlines (see `outline`).
+    static PHONE_LOOK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// The phone look. Termux draws block characters from the font, and they do not fill their
+/// cells there, so filled shapes built from half blocks come out as bricks. Line characters
+/// with round corners join cleanly, so every shape is a round outline.
+fn outline() -> bool {
+    PHONE_LOOK.with(|o| o.get())
+}
+/// Buttons and the typing bar as outlines too: with the phone's own font. With a Nerd Font
+/// they are one-line pills with true half-circle ends, which Termux draws cleanly.
+fn outline_controls() -> bool {
+    outline() && !nerd_font()
+}
+/// A round outline around `area` (at least 2 by 2).
+fn outline_box(frame: &mut Frame, area: Rect, color: Color) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let style = Style::default().fg(color).bg(Color::Reset);
+    let middle = "─".repeat(area.width as usize - 2);
+    frame.render_widget(
+        Paragraph::new(format!("╭{middle}╮")).style(style),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(format!("╰{middle}╯")).style(style),
+        Rect::new(area.x, area.bottom() - 1, area.width, 1),
+    );
+    for row in area.y + 1..area.bottom() - 1 {
+        for column in [area.x, area.right() - 1] {
+            frame.render_widget(
+                Paragraph::new("│").style(style),
+                Rect::new(column, row, 1, 1),
+            );
+        }
+    }
 }
 /// A square button with a drawn icon.
 #[allow(clippy::too_many_arguments)]
@@ -4350,6 +4596,36 @@ fn square(
     enabled: bool,
 ) {
     let color = if enabled { color } else { Color::DarkGray };
+    if outline_controls() && area.height >= 3 {
+        // The phone look: a round outline with the icon inside. Only characters the phone's
+        // own font has, and none that Android would swap for a color picture.
+        let symbol = match art {
+            "plus" => "✚",
+            "close" => "✕",
+            "refresh" => "↻",
+            "mic" => "●",
+            "stop" => "■",
+            "send" => "➤",
+            _ => icon[0],
+        };
+        // The record button is the one that matters: its outline is in its own color.
+        let edge = if matches!(art, "mic" | "stop") {
+            color
+        } else {
+            Color::DarkGray
+        };
+        outline_box(frame, area, edge);
+        frame.render_widget(
+            Paragraph::new(symbol)
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Rect::new(area.x + 1, area.y + 1, area.width - 2, 1),
+        );
+        if enabled {
+            hits.push(Hit { area, action });
+        }
+        return;
+    }
     // Real pixel art when the terminal can draw images; characters otherwise.
     let (accent, record) = theme_rgb();
     let rgb = match color {
@@ -4515,6 +4791,16 @@ fn engine_chip(
     } else {
         Color::DarkGray
     };
+    if outline_controls() {
+        outline_box(frame, area, Color::DarkGray);
+        frame.render_widget(
+            Paragraph::new(word)
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(color)),
+            Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), 1),
+        );
+        return;
+    }
     text_plate(frame, area, word, color);
 }
 fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
@@ -4525,7 +4811,16 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
         screen,
     );
     if screen.width < 40 || screen.height < 16 {
-        frame.render_widget(Paragraph::new("3Yiddish\nMake the window bigger."), screen);
+        let how = if outline() {
+            // On a phone the keyboard takes most of a sideways screen.
+            "3Yiddish\nNot enough room: hide the keyboard (Back)."
+        } else {
+            "3Yiddish\nMake the window bigger."
+        };
+        frame.render_widget(
+            Paragraph::new(how).wrap(ratatui::widgets::Wrap { trim: true }),
+            screen,
+        );
         return hits;
     }
     let margin = if screen.width >= 80 { 2 } else { 1 };
@@ -4623,6 +4918,16 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
             !state.upgrading && !active,
         ));
     }
+    if state.font_offer {
+        // Before the model in the list: the model's chip keeps its place nearest the buttons.
+        let at = tools
+            .len()
+            .saturating_sub(usize::from(state.model_update.is_some()));
+        tools.insert(
+            at,
+            ("Get font", Click::GetFont, !state.upgrading && !active),
+        );
+    }
     let mut x = area.right();
     for (icon, color, action, enabled) in [
         (("close", "✕"), THEME_RECORD, Click::Key(KeyCode::Esc), true),
@@ -4655,7 +4960,8 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
             .map(|(label, ..)| label.chars().count() as u16 + 3)
             .sum::<u16>()
             + 16
-            + if state.notice.is_empty() { 0 } else { 9 };
+            // On the phone look an alert has its own row under the bar.
+            + if state.notice.is_empty() || outline() { 0 } else { 9 };
         if x >= logo_end + w + 1 + others {
             x -= w;
             engine_chip(
@@ -4671,8 +4977,34 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
     for (label, action, enabled) in tools.iter().rev() {
         let text = format!(" {label} ");
         let w = text.chars().count() as u16;
-        x = x.saturating_sub(w);
+        // On a narrow screen the chips furthest from the buttons give way to the logo.
+        if x < logo_end + w {
+            break;
+        }
+        x -= w;
         let chip = Rect::new(x, head, w, 1);
+        if outline_controls() {
+            // The phone look: the same round outline as the buttons, in the accent color.
+            let color = if *enabled {
+                THEME_ACCENT
+            } else {
+                Color::DarkGray
+            };
+            let chip = Rect::new(x, area.y, w, 3);
+            outline_box(frame, chip, color);
+            frame.render_widget(
+                Paragraph::new(*label).style(Style::default().fg(color)),
+                Rect::new(x + 1, head, w - 2, 1),
+            );
+            if *enabled {
+                hits.push(Hit {
+                    area: chip,
+                    action: *action,
+                });
+            }
+            x = x.saturating_sub(1);
+            continue;
+        }
         frame.render_widget(
             Paragraph::new(text).style(
                 Style::default()
@@ -4685,6 +5017,10 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
             ),
             chip,
         );
+        if slim_round() {
+            // A pill like the buttons: half-circle ends in place of the two side spaces.
+            pill_caps(frame, x, x + w - 1, head, THEME_ACCENT);
+        }
         if *enabled {
             hits.push(Hit {
                 area: chip,
@@ -4700,45 +5036,71 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
     } else {
         ""
     };
-    let status_w = status.chars().count() as u16;
-    frame.render_widget(
-        Paragraph::new(status).style(Style::default().fg(if active {
-            THEME_RECORD
-        } else {
-            Color::DarkGray
-        })),
-        Rect::new(x.saturating_sub(status_w + 1), head, status_w, 1),
-    );
-    // Alerts live in the top bar, between the logo and the buttons.
+    // The lines around the two bars. The phone look has none: eighth-of-a-cell lines come out
+    // dashed there, and the shapes frame the bars by themselves.
+    let lines = !outline();
+    let mut status_w = status.chars().count() as u16;
+    // On a narrow screen the status would run into the logo; the typing bar and the
+    // thinking bubble say the same there.
+    if x.saturating_sub(status_w + 1) + 2 < logo_end {
+        status_w = 0;
+    } else {
+        frame.render_widget(
+            Paragraph::new(status).style(Style::default().fg(if active {
+                THEME_RECORD
+            } else {
+                Color::DarkGray
+            })),
+            Rect::new(x.saturating_sub(status_w + 1), head, status_w, 1),
+        );
+    }
+    // Alerts live in the top bar, between the logo and the buttons. One that does not fit
+    // there whole (a narrow window, a phone) gets the row under the bar to itself.
     if !state.notice.is_empty() {
         let left = logo_end;
         let right = x.saturating_sub(status_w + 2);
-        if right > left + 8 {
+        let notice = clean(&state.notice).replace('\n', " ");
+        let length = notice.chars().count() as u16;
+        if right > left && length <= right - left {
             // Centered on the window itself; nudged only if it would touch the logo or buttons.
-            let text: String = clean(&state.notice)
-                .replace('\n', " ")
-                .chars()
-                .take((right - left) as usize)
-                .collect();
-            let width = text.chars().count() as u16;
-            let start = (area.x + area.width.saturating_sub(width) / 2)
-                .min(right - width)
+            let start = (area.x + area.width.saturating_sub(length) / 2)
+                .min(right - length)
                 .max(left);
             frame.render_widget(
+                Paragraph::new(notice).style(Style::default().fg(THEME_ACCENT)),
+                Rect::new(start, head, length, 1),
+            );
+        } else {
+            let mut text: String = notice.chars().take(area.width as usize).collect();
+            if length > area.width {
+                text.pop();
+                text.push('…');
+            }
+            let width = text.chars().count() as u16;
+            frame.render_widget(
                 Paragraph::new(text).style(Style::default().fg(THEME_ACCENT)),
-                Rect::new(start, head, width, 1),
+                Rect::new(
+                    area.x + (area.width - width) / 2,
+                    area.y + if lines { 4 } else { 3 },
+                    width,
+                    1,
+                ),
             );
         }
     }
-    frame.render_widget(
-        Paragraph::new("▔".repeat(area.width as usize)).style(Style::default().fg(Color::DarkGray)),
-        Rect::new(area.x, area.y + 3, area.width, 1),
-    );
-    // And one above the bar; both hug it (drawn on the near edge of their rows).
-    frame.render_widget(
-        Paragraph::new("▁".repeat(area.width as usize)).style(Style::default().fg(Color::DarkGray)),
-        Rect::new(area.x, area.y - 1, area.width, 1),
-    );
+    if lines {
+        frame.render_widget(
+            Paragraph::new("▔".repeat(area.width as usize))
+                .style(Style::default().fg(Color::DarkGray)),
+            Rect::new(area.x, area.y + 3, area.width, 1),
+        );
+        // And one above the bar; both hug it (drawn on the near edge of their rows).
+        frame.render_widget(
+            Paragraph::new("▁".repeat(area.width as usize))
+                .style(Style::default().fg(Color::DarkGray)),
+            Rect::new(area.x, area.y - 1, area.width, 1),
+        );
+    }
     // Bottom: one slim row, edge to edge: plus, the typing line, mic/send.
     let typed = !state.input.trim().is_empty();
     square(
@@ -4778,7 +5140,39 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
         1,
     );
     let inner = box_area.width.saturating_sub(2) as usize;
-    let line = if active {
+    // The longest of these that fits the bar.
+    let fitting = |choices: &[&'static str]| -> &'static str {
+        choices
+            .iter()
+            .find(|text| text.chars().count() <= inner)
+            .or(choices.last())
+            .copied()
+            .unwrap_or_default()
+    };
+    let line = if active && !crate::audio::LIVE_LEVEL {
+        // A phone's recorder gives no live level, so there is no wave to draw: the timer
+        // and what to do next.
+        let timer = format!(
+            " {} ",
+            clock(
+                state
+                    .rec_started
+                    .map_or(0.0, |at| at.elapsed().as_secs_f32())
+            )
+        );
+        Line::from(vec![
+            Span::styled(timer, Style::default().fg(THEME_RECORD)),
+            Span::raw(if nerd_font() {
+                fitting(&[
+                    " Recording. Tap \u{f04d} to send it.",
+                    " Tap \u{f04d} to send",
+                    "",
+                ])
+            } else {
+                fitting(&[" Recording. Tap ■ to send it.", " Tap ■ to send", ""])
+            }),
+        ])
+    } else if active {
         // Recording: the bar is the live voice, newest on the right, with a running timer.
         const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
         let timer = format!(
@@ -4807,19 +5201,54 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
                 .collect::<String>()
         ))
     } else {
-        Line::from(Span::styled(
-            " Hold Space to talk, or drop / Ctrl+V a recording",
-            Style::default().fg(Color::DarkGray),
-        ))
+        let hint = if outline() {
+            // The same symbol as on the record button (an icon with a Nerd Font).
+            if nerd_font() {
+                fitting(&[
+                    " Tap \u{f130} to talk, or + for a recording",
+                    " Tap \u{f130} to talk",
+                    "",
+                ])
+            } else {
+                fitting(&[" Tap ● to talk, or + for a recording", " Tap ● to talk", ""])
+            }
+        } else {
+            fitting(&[
+                " Hold Space to talk, or drop / Ctrl+V a recording",
+                " Hold Space to talk, or drop a recording",
+                " Hold Space to talk",
+                "",
+            ])
+        };
+        Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray)))
     };
     // The typing bar is a fat rounded bubble: the text row plus half a row above and below,
     // with corners drawn as real pixels when the terminal can.
     let fill = surface();
-    frame.render_widget(
-        Paragraph::new(line).style(Style::default().bg(fill)),
-        box_area,
-    );
-    if slim_round() && box_area.width > 4 {
+    if outline_controls() {
+        // The phone look: a round outline, red while recording.
+        outline_box(
+            frame,
+            Rect::new(box_area.x, bar_y - 1, box_area.width, 3),
+            if active {
+                THEME_RECORD
+            } else {
+                Color::DarkGray
+            },
+        );
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect::new(box_area.x + 1, bar_y, box_area.width.saturating_sub(2), 1),
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(line).style(Style::default().bg(fill)),
+            box_area,
+        );
+    }
+    if outline_controls() {
+        // Drawn above.
+    } else if slim_round() && box_area.width > 4 {
         pill_caps(frame, box_area.x, box_area.right() - 1, bar_y, fill);
     } else if box_area.width > 4 {
         let edge = (box_area.width - 2) as usize;
@@ -4838,14 +5267,18 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
             surface_rgb(),
         );
     }
-    frame.render_widget(
-        Paragraph::new("▁".repeat(area.width as usize)).style(Style::default().fg(Color::DarkGray)),
-        Rect::new(area.x, bar_y - 2, area.width, 1),
-    );
-    frame.render_widget(
-        Paragraph::new("▔".repeat(area.width as usize)).style(Style::default().fg(Color::DarkGray)),
-        Rect::new(area.x, bar_y + 2, area.width, 1),
-    );
+    if lines {
+        frame.render_widget(
+            Paragraph::new("▁".repeat(area.width as usize))
+                .style(Style::default().fg(Color::DarkGray)),
+            Rect::new(area.x, bar_y - 2, area.width, 1),
+        );
+        frame.render_widget(
+            Paragraph::new("▔".repeat(area.width as usize))
+                .style(Style::default().fg(Color::DarkGray)),
+            Rect::new(area.x, bar_y + 2, area.width, 1),
+        );
+    }
     // Messages, newest at the bottom, sized to their text. What you sent is on the right in
     // the accent color; transcripts come in on the left. Clicking a transcript copies it.
     let top = area.y + 5;
@@ -4902,6 +5335,24 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
                 }
             }
             return Rect::new(x, y, w, h);
+        }
+        if outline() {
+            // The phone look: a round outline, in the accent color for what you sent (and
+            // for a reply that was just copied).
+            let edge = if bg == THEME_ACCENT || fg == THEME_ACCENT {
+                THEME_ACCENT
+            } else {
+                Color::DarkGray
+            };
+            outline_box(frame, Rect::new(x, y - 1, w, h + 2), edge);
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .alignment(Alignment::Right)
+                    .style(Style::default().fg(Color::Reset))
+                    .block(Block::default().padding(ratatui::widgets::Padding::horizontal(1))),
+                Rect::new(x + 1, y, w - 2, h),
+            );
+            return Rect::new(x, y - 1, w, h + 2);
         }
         if h == 1 && nerd_font() {
             // One line: a true pill.
@@ -4961,7 +5412,12 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
                 let glow = (1.0 - crest / 4.0).clamp(0.35, 1.0);
                 let c = |v: u8| (v as f32 * glow) as u8;
                 Span::styled(
-                    LEVELS[level.min(7)].to_string(),
+                    if outline() {
+                        // The phone look: dots like the voice note's wave (blocks leave gaps there).
+                        ['⠂', '⠆', '⠇', '⡇'][level.min(7) / 2].to_string()
+                    } else {
+                        LEVELS[level.min(7)].to_string()
+                    },
                     Style::default().fg(Color::Rgb(c(accent[0]), c(accent[1]), c(accent[2]))),
                 )
             })
@@ -5019,6 +5475,9 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
             });
             let mut spans = vec![Span::raw(if play.is_some_and(|p| !p.paused) {
                 "▮▮ "
+            } else if outline() {
+                // Not the usual play triangle: phones may draw that one as a color picture.
+                "►  "
             } else {
                 "▶  "
             })];
@@ -5260,14 +5719,10 @@ fn clipboard_get() -> Option<String> {
 /// Android: the phone's clipboard through Termux:API.
 #[cfg(target_os = "android")]
 fn clipboard_get() -> Option<String> {
-    std::process::Command::new("termux-clipboard-get")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    crate::audio::termux("termux-clipboard-get", &[], None, 3).ok()
 }
 #[cfg(not(target_os = "android"))]
-fn copy_text(state: &mut Screen, text: &str) {
+fn copy_text(state: &mut Screen, text: &str, _tx: &mpsc::UnboundedSender<Update>) {
     if state.clipboard.is_none() {
         state.clipboard = arboard::Clipboard::new().ok();
     }
@@ -5280,26 +5735,53 @@ fn copy_text(state: &mut Screen, text: &str) {
         _ => "Cannot reach the clipboard.".into(),
     };
 }
+/// Android: the phone's clipboard through Termux:API, asked in the background so the screen
+/// never waits for the phone (it answers in a fraction of a second). The bubble lights up
+/// at once; "Copied." is said when the phone has taken it, or what is missing.
 #[cfg(target_os = "android")]
-fn copy_text(state: &mut Screen, text: &str) {
-    use std::io::Write;
-    let copied = std::process::Command::new("termux-clipboard-set")
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .and_then(|mut child| {
-            child.stdin.take().map(|mut i| i.write_all(text.as_bytes()));
-            child.wait()
-        })
-        .is_ok_and(|s| s.success());
-    state.notice = if copied {
-        "Copied.".into()
-    } else {
-        "To copy, install the Termux:API app and run: pkg install termux-api".into()
-    };
+fn copy_text(_state: &mut Screen, text: &str, tx: &mpsc::UnboundedSender<Update>) {
+    let (text, tx) = (text.to_owned(), tx.clone());
+    std::thread::spawn(move || {
+        let said = match crate::audio::termux("termux-clipboard-set", &[], Some(&text), 4) {
+            Ok(_) => "Copied.".to_owned(),
+            Err(error) => error.to_string(),
+        };
+        let _ = tx.send(Update::Notice(said));
+    });
 }
 /// Open the system file picker in the background; the choice comes back as `Update::Picked`.
 fn pick_file(tx: mpsc::UnboundedSender<Update>) {
     std::thread::spawn(move || {
+        // Android: the phone's own file picker, through Termux:API. The command returns at
+        // once and the chosen file is copied here when the user picks one (never, if they
+        // back out), so the file is waited for.
+        #[cfg(target_os = "android")]
+        {
+            let folder = Path::new("state/picked");
+            let _ = std::fs::create_dir_all(folder);
+            let Ok(file) = std::path::absolute(folder.join(uuid::Uuid::new_v4().to_string()))
+            else {
+                return;
+            };
+            let name = file.to_string_lossy().into_owned();
+            if let Err(error) = crate::audio::termux("termux-storage-get", &[&name], None, 5) {
+                let _ = tx.send(Update::Notice(error.to_string()));
+                return;
+            }
+            let size = || std::fs::metadata(&file).map_or(0, |m| m.len());
+            for _ in 0..1500 {
+                std::thread::sleep(Duration::from_millis(200));
+                let before = size();
+                if before > 0 {
+                    // Still being copied while it grows.
+                    std::thread::sleep(Duration::from_millis(300));
+                    if size() == before {
+                        let _ = tx.send(Update::Picked(Some(name)));
+                        return;
+                    }
+                }
+            }
+        }
         // Linux: the desktop's own picker (works on GNOME, KDE, Hyprland, ...).
         #[cfg(target_os = "linux")]
         {
@@ -5316,6 +5798,7 @@ fn pick_file(tx: mpsc::UnboundedSender<Update>) {
                 return;
             }
         }
+        #[cfg(not(target_os = "android"))]
         let attempts: Vec<(&str, Vec<&str>)> = if cfg!(target_os = "macos") {
             vec![(
                 "osascript",
@@ -5342,17 +5825,20 @@ fn pick_file(tx: mpsc::UnboundedSender<Update>) {
                 ("kdialog", vec!["--getopenfilename", "."]),
             ]
         };
-        let mut picked = None;
-        for (program, args) in attempts {
-            if let Ok(out) = std::process::Command::new(program).args(&args).output() {
-                let path = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-                if out.status.success() && !path.is_empty() {
-                    picked = Some(path);
+        #[cfg(not(target_os = "android"))]
+        {
+            let mut picked = None;
+            for (program, args) in attempts {
+                if let Ok(out) = std::process::Command::new(program).args(&args).output() {
+                    let path = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+                    if out.status.success() && !path.is_empty() {
+                        picked = Some(path);
+                    }
+                    break;
                 }
-                break;
             }
+            let _ = tx.send(Update::Picked(picked));
         }
-        let _ = tx.send(Update::Picked(picked));
     });
 }
 
@@ -5737,6 +6223,16 @@ mod tests {
         state.pair = Some(json!({"id":"fixture-pair","join_url":"https://192.168.1.20/#fixture"}));
         state.history = vec![json!({"role":"user","content":"א גוטן"})];
         state.phone_audio = true;
+        // The regular app's chat and its voice notes come along too.
+        state.plain_log = vec![(true, String::new()), (false, "א גוטן טאג".into())];
+        state.voices.insert(
+            0,
+            Voice {
+                path: PathBuf::from("/tmp/take.wav"),
+                seconds: 3.0,
+                peaks: vec![1, 2, 3],
+            },
+        );
         let path = Resume::capture(&state).save().unwrap();
         #[cfg(unix)]
         {
@@ -5755,6 +6251,9 @@ mod tests {
         assert_eq!(restored.history, state.history);
         assert_eq!(restored.pair, state.pair);
         assert!(restored.phone_audio);
+        assert_eq!(restored.plain_log, state.plain_log);
+        assert_eq!(restored.voices[&0].seconds, 3.0);
+        assert_eq!(restored.voices[&0].peaks, vec![1, 2, 3]);
     }
     #[test]
     fn paired_audio_output_is_clickable_and_independent_of_phone_mic() {
@@ -6147,5 +6646,173 @@ mod tests {
         assert!(!is_yiddish(
             "זכתה בעלזא, ורבים מהניגונים החסידיים יצאו מבית מדרשה."
         ));
+    }
+    /// The phone look (Termux): every state, on screens from the narrowest allowed up to a
+    /// phone held upright, with the phone's own font and with a Nerd Font. Nothing overlaps,
+    /// no shape is built from half blocks (Termux draws those as bricks), and nothing runs
+    /// off the screen.
+    #[test]
+    fn phone_look_fits_narrow_screens_without_blocks_or_overlap() {
+        PHONE_LOOK.with(|o| o.set(true));
+        for nerd in [false, true] {
+            NERD_FOR_TEST.with(|n| n.set(Some(nerd)));
+            for width in 40..=64u16 {
+                for height in [16u16, 22, 31, 52] {
+                    let mut plain = Screen::default();
+                    plain.tab = 1;
+                    let mut first = Screen::default();
+                    first.tab = 1;
+                    first.model_update = Some("first".into());
+                    first.font_offer = true;
+                    let mut talking = Screen::default();
+                    talking.tab = 1;
+                    talking.demo_rec = Some(std::time::Instant::now());
+                    talking.rec_started = Some(std::time::Instant::now());
+                    let mut alert = Screen::default();
+                    alert.tab = 1;
+                    alert.notice = "Install the Termux:API app first.".into();
+                    alert.plain_log = vec![
+                        (true, String::new()),
+                        (false, "א גוטן טאג, וואס מאכט איר? ".repeat(4)),
+                    ];
+                    alert.voices.insert(
+                        0,
+                        Voice {
+                            path: PathBuf::new(),
+                            seconds: 7.0,
+                            peaks: vec![40, 200, 90, 255],
+                        },
+                    );
+                    let mut busy = Screen::default();
+                    busy.tab = 1;
+                    busy.busy = true;
+                    busy.input = "/sdcard/Download/a.m4a".into();
+                    for (name, state) in [
+                        ("plain", &plain),
+                        ("first", &first),
+                        ("talking", &talking),
+                        ("alert", &alert),
+                        ("busy", &busy),
+                    ] {
+                        let at = format!("{name} {width}x{height} nerd={nerd}");
+                        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
+                            width, height,
+                        ))
+                        .unwrap();
+                        let mut hits = vec![];
+                        term.draw(|f| hits = draw(f, state, &[])).unwrap();
+                        let text = rendered_text(&term);
+                        assert!(
+                            !text.contains(['▄', '▀', '▐', '▌', '▗', '▖', '▝', '▘', '▔']),
+                            "{at}: block shapes\n{text}"
+                        );
+                        assert!(text.contains("3YIDDISH"), "{at}\n{text}");
+                        // Controls with the phone's font are outlines; pills with a Nerd Font.
+                        assert_eq!(text.contains("╭───╮"), !nerd, "{at}\n{text}");
+                        for (i, a) in hits.iter().enumerate() {
+                            assert!(
+                                a.area.right() <= width && a.area.bottom() <= height,
+                                "{at}: {:?} off the screen",
+                                a.action
+                            );
+                            for b in &hits[i + 1..] {
+                                assert!(
+                                    a.area.intersection(b.area).is_empty(),
+                                    "{at}: {:?} over {:?}\n{text}",
+                                    a.action,
+                                    b.action
+                                );
+                            }
+                        }
+                        for action in [Click::Attach, Click::Key(KeyCode::Esc)] {
+                            assert!(
+                                hits.iter().any(|h| h.area.width > 0 && h.action == action)
+                                    || (action == Click::Attach
+                                        && (name == "talking" || name == "busy")),
+                                "{at}: {action:?}"
+                            );
+                        }
+                        if name == "alert" {
+                            // The alert is shown whole, on its own row.
+                            assert!(
+                                text.contains("Install the Termux:API app first."),
+                                "{at}\n{text}"
+                            );
+                        }
+                        if name == "first" {
+                            // The font chip gives way first where both do not fit.
+                            assert!(width < 50 || text.contains("Get font"), "{at}\n{text}");
+                            assert!(text.contains("Get model"), "{at}\n{text}");
+                        }
+                        if let Ok(folder) = std::env::var("TUI_LAYOUT_DUMP_DIR") {
+                            std::fs::create_dir_all(&folder).unwrap();
+                            std::fs::write(
+                                Path::new(&folder)
+                                    .join(format!("phone-{name}-{width}x{height}-nerd-{nerd}.txt")),
+                                &text,
+                            )
+                            .unwrap();
+                        }
+                    }
+                }
+            }
+        }
+        NERD_FOR_TEST.with(|n| n.set(None));
+        PHONE_LOOK.with(|o| o.set(false));
+    }
+    #[test]
+    fn nerd_font_is_told_from_the_font_file_itself() {
+        assert!(names_nerd_font(b"\0\0Cousine Nerd Font Mono\0"));
+        let wide: Vec<u8> = "JetBrainsMono Nerd Font"
+            .bytes()
+            .flat_map(|b| [0, b])
+            .collect();
+        assert!(names_nerd_font(&wide));
+        assert!(!names_nerd_font(b"Droid Sans Mono"));
+    }
+    /// The terminal's answers arrive in one piece: all of it is read (not just what one
+    /// buffered read happened to take), nothing after it is taken, and a terminal that
+    /// answers nothing does not hold up the start.
+    #[cfg(unix)]
+    #[test]
+    fn terminal_reply_is_read_whole_and_never_waited_for_long() {
+        let pipe = || {
+            let mut fds = [0; 2];
+            // SAFETY: a fresh pipe; both ends are closed below.
+            assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+            (fds[0], fds[1])
+        };
+        let (read, write) = pipe();
+        // Termux: no palette answer, the background, then the attributes; a key follows.
+        let reply = b"\x1b]11;rgb:0000/0000/0000\x07\x1b[?64;1;2;6;9;15;18;21;22cq";
+        // SAFETY: writes the bytes above to the pipe just made.
+        unsafe { libc::write(write, reply.as_ptr().cast(), reply.len()) };
+        let begun = std::time::Instant::now();
+        let text = read_reply(read, Duration::from_secs(5)).unwrap();
+        assert!(begun.elapsed() < Duration::from_secs(1));
+        assert!(text.ends_with("22c") && text.contains("]11;rgb:0000"));
+        // No palette: no theme, and the defaults are used.
+        assert_eq!(parse_theme(&text), None);
+        // The key after the answer is still there for the app.
+        let mut key = 0u8;
+        // SAFETY: reads one byte from the pipe.
+        assert_eq!(unsafe { libc::read(read, (&raw mut key).cast(), 1) }, 1);
+        assert_eq!(key, b'q');
+        // A desktop terminal answers everything.
+        let full = b"\x1b]4;4;rgb:8080/a0a0/ffff\x07\x1b]4;1;rgb:ffff/4040/4040\x07\x1b]11;rgb:1010/1010/2020\x07\x1b[?62;4c";
+        // SAFETY: as above.
+        unsafe { libc::write(write, full.as_ptr().cast(), full.len()) };
+        let (accent, record, _) =
+            parse_theme(&read_reply(read, Duration::from_secs(5)).unwrap()).unwrap();
+        assert_eq!((accent, record), ([0x80, 0xa0, 0xff], [0xff, 0x40, 0x40]));
+        // Silence: given up on after the limit.
+        let begun = std::time::Instant::now();
+        assert_eq!(read_reply(read, Duration::from_millis(150)), None);
+        assert!(begun.elapsed() < Duration::from_secs(2));
+        // SAFETY: the two ends of the pipe made above.
+        unsafe {
+            libc::close(read);
+            libc::close(write);
+        }
     }
 }

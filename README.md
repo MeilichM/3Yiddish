@@ -22,7 +22,10 @@ That's it. It downloads itself, checks it isn't broken, and grabs the speech mod
 
 Got a graphics card? The installer notices and gives you the GPU build, which is about ten
 times faster. A little GPU/CPU button on top shows which one is running; click it to switch.
-On an Android phone it works inside Termux too.
+On an Android phone it works inside Termux too. It needs the Termux:API app (from the same
+place you got Termux) for the microphone, and the installer tells you if it is missing. Tap
+**Get font** once so the Yiddish letters are drawn properly; Termux's own font stretches
+them. (To undo: `rm ~/.termux/font.ttf; termux-reload-settings`.)
 
 ## Use it
 

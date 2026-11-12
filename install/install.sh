@@ -84,18 +84,40 @@ mv "$tmp/3yiddish" "$dir/3yiddish"
 echo "Installed: $dir/3yiddish"
 case ":$PATH:" in *":$dir:"*) ;; *) echo "Add $dir to your PATH to run it from anywhere." ;; esac
 if [ "$os" = Android ]; then
-  # Termux: the microphone, clipboard and playback go through Termux's own add-ons.
+  # Termux: the microphone, clipboard and playback go through Termux's own add-ons. The
+  # lines are short: a phone held upright shows about 45 characters.
   if command -v pkg >/dev/null 2>&1; then
-    echo "Adding the Termux pieces for the microphone and playback..."
-    pkg install -y termux-api play-audio >/dev/null 2>&1 ||
-      echo "Could not add them; run: pkg install termux-api play-audio"
+    echo "Adding the Termux microphone tools..."
+    pkg install -y termux-api play-audio >/dev/null 2>&1 || true
   fi
-  # The Termux:API app is an Android app; a script cannot install one. If it is there, a
-  # harmless question to it answers within a few seconds.
-  if ! timeout 6 termux-battery-status >/dev/null 2>&1; then
-    echo "One thing by hand: install the Termux:API app (its page is opening), then allow the microphone."
-    termux-open-url https://f-droid.org/packages/com.termux.api/ 2>/dev/null ||
-      echo "  https://f-droid.org/packages/com.termux.api/"
+  if ! command -v termux-microphone-record >/dev/null 2>&1; then
+    echo "Could not add them. Run this yourself:"
+    echo "  pkg install termux-api play-audio"
+  elif ! timeout 6 termux-battery-status >/dev/null 2>&1; then
+    # The Termux:API app is an Android app; a script cannot install one. When it is there,
+    # a harmless question to it is answered within a few seconds. It has to come from the
+    # same place as Termux itself, or Android refuses to let the two talk.
+    case "${TERMUX_APK_RELEASE:-}" in
+      GITHUB) page=https://github.com/termux/termux-api/releases/latest ;;
+      GOOGLE_PLAY_STORE) page= ;;
+      *) page=https://f-droid.org/packages/com.termux.api/ ;;
+    esac
+    if [ -n "$page" ]; then
+      echo "One thing by hand: install the Termux:API app"
+      echo "(its page is opening), then come back here."
+      echo "  $page"
+      termux-open-url "$page" 2>/dev/null || true
+    else
+      # The Play Store has Termux but not its Termux:API app.
+      echo "The microphone needs the Termux:API app, and"
+      echo "the Play Store does not have it. Install both"
+      echo "Termux and Termux:API from F-Droid instead:"
+      echo "  https://f-droid.org/packages/com.termux/"
+    fi
+  fi
+  if [ ! -e "$HOME/.termux/font.ttf" ]; then
+    echo "For well-drawn Yiddish letters, tap Get font"
+    echo "in the app (or run: 3yiddish font)."
   fi
 fi
 [ -z "${THREE_YIDDISH_SKIP_MODEL:-}" ] || exit 0
