@@ -83,10 +83,21 @@ fi
 mv "$tmp/3yiddish" "$dir/3yiddish"
 echo "Installed: $dir/3yiddish"
 case ":$PATH:" in *":$dir:"*) ;; *) echo "Add $dir to your PATH to run it from anywhere." ;; esac
+if [ "$os" = Android ]; then
+  # Termux: the microphone, clipboard and playback go through Termux's own add-ons.
+  if command -v pkg >/dev/null 2>&1; then
+    echo "Adding the Termux pieces for the microphone and playback..."
+    pkg install -y termux-api play-audio >/dev/null 2>&1 ||
+      echo "Could not add them; run: pkg install termux-api play-audio"
+  fi
+  # The Termux:API app is an Android app; a script cannot install one. If it is there, a
+  # harmless question to it answers within a few seconds.
+  if ! timeout 6 termux-battery-status >/dev/null 2>&1; then
+    echo "One thing by hand: install the Termux:API app (its page is opening), then allow the microphone."
+    termux-open-url https://f-droid.org/packages/com.termux.api/ 2>/dev/null ||
+      echo "  https://f-droid.org/packages/com.termux.api/"
+  fi
+fi
 [ -z "${THREE_YIDDISH_SKIP_MODEL:-}" ] || exit 0
 "$dir/3yiddish" model pull || echo "Model download did not finish; run: 3yiddish model pull"
-if [ "$os" = Android ]; then
-  echo "For the microphone, clipboard and playback: install the Termux:API app (F-Droid), then"
-  echo "  pkg install termux-api play-audio"
-fi
 echo "Start it with: 3yiddish"
