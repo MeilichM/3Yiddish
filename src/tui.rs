@@ -1,8 +1,8 @@
 //! Terminal-only playground. Models stay behind the same local middleware API.
 use anyhow::{Context, Result, bail};
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use ratatui::{
     Frame,
@@ -76,9 +76,148 @@ enum Update {
     Available(Option<String>, Option<String>),
     /// Progress or result of an app/model update, shown as the notice line.
     Upgrade(String, bool),
+    /// An audio file chosen with the attach button (None: cancelled or no picker).
+    Picked(Option<String>),
+}
+/// A sent recording or audio file that can be played back.
+#[derive(Clone)]
+struct Voice {
+    /// Empty in demo mode (nothing to play; the slider still moves).
+    path: PathBuf,
+    /// 0 until known.
+    seconds: f32,
+    /// The wave, 0 to 7 per bar; empty for attached files.
+    peaks: Vec<u8>,
+}
+struct VoicePlay {
+    index: usize,
+    started: std::time::Instant,
+    /// Where playback stood when it last started or paused.
+    offset: f32,
+    paused: bool,
+}
+impl VoicePlay {
+    fn position(&self) -> f32 {
+        if self.paused {
+            self.offset
+        } else {
+            self.offset + self.started.elapsed().as_secs_f32()
+        }
+    }
+}
+/// Columns the wave takes in a voice note, and how many loudness values are kept for it.
+const PEAKS: usize = 24;
+const PEAK_VALUES: usize = 48;
+/// Squeeze a recording's loudness history into the bars of a voice note.
+fn peaks(levels: &[f32]) -> Vec<u8> {
+    if levels.is_empty() {
+        return Vec::new();
+    }
+    (0..PEAK_VALUES)
+        .map(|i| {
+            let (a, b) = (
+                i * levels.len() / PEAK_VALUES,
+                ((i + 1) * levels.len() / PEAK_VALUES).max(1),
+            );
+            let peak = levels
+                [a.min(levels.len() - 1)..b.min(levels.len()).max(a.min(levels.len() - 1) + 1)]
+                .iter()
+                .fold(0.0f32, |p, v| p.max(*v));
+            ((peak.clamp(0.0, 1.0) * 4.0).sqrt().min(1.0) * 255.0) as u8
+        })
+        .collect()
+}
+/// Loudness (0 to 1) as a bar height 0 to 7; quiet speech still shows.
+fn bar(level: f32) -> u8 {
+    ((level.clamp(0.0, 1.0) * 4.0).sqrt().min(1.0) * 7.0).round() as u8
+}
+fn clock(seconds: f32) -> String {
+    let s = seconds.max(0.0) as u32;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+/// Start (or restart) listening to a voice note from `offset` seconds.
+fn voice_start(state: &mut Screen, index: usize, offset: f32) {
+    state.playback = None;
+    state.voice_play = None;
+    let Some(voice) = state.voices.get(&index).cloned() else {
+        return;
+    };
+    if voice.path.is_file() {
+        match crate::audio::Playback::start(&voice.path) {
+            Ok(player) => {
+                if let (Some(seconds), Some(v)) = (player.seconds(), state.voices.get_mut(&index)) {
+                    v.seconds = seconds;
+                }
+                if offset > 0.0 {
+                    player.seek(offset);
+                }
+                state.playback = Some(player);
+            }
+            Err(error) => {
+                state.notice = format!("Cannot play it: {error}");
+                return;
+            }
+        }
+    } else if !voice.path.as_os_str().is_empty() {
+        state.notice = "That recording is gone.".into();
+        return;
+    }
+    state.voice_play = Some(VoicePlay {
+        index,
+        started: std::time::Instant::now(),
+        offset,
+        paused: false,
+    });
+}
+fn voice_toggle(state: &mut Screen, index: usize) {
+    if let Some(play) = state.voice_play.as_mut().filter(|p| p.index == index) {
+        if play.paused {
+            play.started = std::time::Instant::now();
+            play.paused = false;
+        } else {
+            play.offset = play.position();
+            play.paused = true;
+        }
+        if let Some(player) = &state.playback {
+            player.set_paused(play.paused);
+        }
+        return;
+    }
+    voice_start(state, index, 0.0);
+}
+fn voice_seek(state: &mut Screen, index: usize, permille: u16) {
+    let seconds = state.voices.get(&index).map_or(0.0, |v| v.seconds);
+    let target = seconds * permille as f32 / 1000.0;
+    if let Some(play) = state.voice_play.as_mut().filter(|p| p.index == index) {
+        play.offset = target;
+        play.started = std::time::Instant::now();
+        if let Some(player) = &state.playback {
+            player.seek(target);
+        }
+        return;
+    }
+    voice_start(state, index, target);
 }
 #[derive(Default)]
 struct Screen {
+    /// Plain app: this session's messages, newest last; `true` marks what the user sent
+    /// (a file name, a recording), `false` a transcript.
+    plain_log: Vec<(bool, String)>,
+    /// Sent recordings and files, by their place in `plain_log`: shown as voice notes.
+    voices: std::collections::HashMap<usize, Voice>,
+    /// The voice note being listened to.
+    voice_play: Option<VoicePlay>,
+    /// Microphone loudness over the current recording, one value per screen refresh.
+    levels: Vec<f32>,
+    rec_started: Option<std::time::Instant>,
+    /// Demo mode's pretend recording.
+    demo_rec: Option<std::time::Instant>,
+    /// The response just copied by a click, for a moment of feedback.
+    copied: Option<(usize, std::time::Instant)>,
+    /// The notice on screen and when it appeared, so the plain app can clear it by itself.
+    notice_since: Option<(String, std::time::Instant)>,
+    /// Kept alive so copied text stays on the clipboard (Linux drops it with the owner).
+    clipboard: Option<arboard::Clipboard>,
     tab: usize,
     input: String,
     drafts: [String; 7],
@@ -276,7 +415,9 @@ fn finish_recording(state: &mut Screen, actions: &mpsc::UnboundedSender<Action>)
         return Ok(());
     };
     let path = state.recording_path.take().context("No recording file")?;
+    let mut seconds = 0.0;
     let saved = recorder.stop().and_then(|pcm| {
+        seconds = pcm.len() as f32 / 16_000.0;
         let mut options = std::fs::OpenOptions::new();
         options.create(true).truncate(true).write(true);
         #[cfg(unix)]
@@ -291,6 +432,18 @@ fn finish_recording(state: &mut Screen, actions: &mpsc::UnboundedSender<Action>)
         state.notice = format!("Microphone recording failed: {error}");
         state.read_pending = None;
         return Ok(());
+    }
+    if !state.lab {
+        // A voice note the user can listen back to.
+        state.voices.insert(
+            state.plain_log.len(),
+            Voice {
+                path: path.clone(),
+                seconds,
+                peaks: peaks(&state.levels),
+            },
+        );
+        state.plain_log.push((true, String::new()));
     }
     state.input = path.to_string_lossy().into_owned();
     state.audio_path = Some(path);
@@ -321,7 +474,11 @@ fn speak_destination(input: &str, directory: &Path) -> Result<(String, PathBuf)>
 struct Restore;
 impl Drop for Restore {
     fn drop(&mut self) {
-        let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            DisableMouseCapture,
+            DisableBracketedPaste
+        );
         ratatui::restore();
     }
 }
@@ -886,6 +1043,11 @@ enum Click {
     PlayPick,
     Toss,
     RedoPick,
+    Attach,
+    CopyAt(usize),
+    VoiceToggle(usize),
+    /// Jump to this many thousandths of the way through.
+    VoiceSeek(usize, u16),
 }
 #[derive(Clone, Copy)]
 struct Hit {
@@ -944,6 +1106,7 @@ type Control<'a> = (&'a str, Click, bool);
 
 fn recording(state: &Screen) -> bool {
     state.recording.is_some()
+        || state.demo_rec.is_some()
         || state
             .phone_status
             .as_ref()
@@ -1335,6 +1498,9 @@ fn draw_chat(frame: &mut Frame, state: &Screen, area: Rect) {
     }
 }
 fn draw(frame: &mut Frame, state: &Screen, watches: &[(String, PathBuf)]) -> Vec<Hit> {
+    if plain(state) {
+        return draw_plain(frame, state);
+    }
     let mut hits = Vec::new();
     let screen = frame.area();
     frame.render_widget(
@@ -1512,7 +1678,9 @@ fn draw(frame: &mut Frame, state: &Screen, watches: &[(String, PathBuf)]) -> Vec
         areas[1],
         &tabs,
         &tab_rects,
-        Some(state.tab),
+        // Position in the visible bar, not the tab's index (hidden tabs are skipped).
+        tabs.iter()
+            .position(|(_, a, _)| *a == Click::Tab(state.tab)),
     );
     let panel = Block::default()
         .borders(Borders::TOP)
@@ -2618,7 +2786,9 @@ fn terminal(
     }
     let mut terminal = ratatui::init();
     let _restore = Restore;
-    crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
+    // Before mouse reporting starts, so nothing else arrives in the terminal's answers.
+    init_graphics();
+    crossterm::execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     // Background check for a newer app and model; never blocks the screen, silent offline.
     let tx = eval_tx.clone();
     std::thread::spawn(move || {
@@ -2667,6 +2837,37 @@ fn terminal(
     }
     if !state.lab {
         state.pair = None;
+        // Demo mode starts with a couple of messages so the screen can be judged at a glance.
+        if std::env::var_os("THREE_YIDDISH_DEMO").is_some() && state.plain_log.is_empty() {
+            state.plain_log = vec![
+                (true, String::new()),
+                (false, "א גוטן טאג, וואס מאכט איר?".into()),
+                (true, String::new()),
+                (
+                    false,
+                    "ווען מען רעדט אריין אין מיקראפאן, שרייבט עס זיך אויס דא, שורה נאך שורה, און מען קען קליקן אויף דעם ענטפער כדי עס צו קאפירן.".into(),
+                ),
+            ];
+            let wave: Vec<f32> = (0..96)
+                .map(|i| (noise(i, 9) % 100) as f32 / 400.0 * ((i as f32 / 9.0).sin().abs() + 0.2))
+                .collect();
+            state.voices.insert(
+                0,
+                Voice {
+                    path: PathBuf::new(),
+                    seconds: 7.0,
+                    peaks: peaks(&wave),
+                },
+            );
+            state.voices.insert(
+                2,
+                Voice {
+                    path: PathBuf::new(),
+                    seconds: 42.0,
+                    peaks: Vec::new(),
+                },
+            );
+        }
     }
     refresh_readings(&mut state, READ_LOG);
     load_playground(&mut state);
@@ -2766,6 +2967,12 @@ fn terminal(
                         state.phone_status = Some(v);
                     }
                 }
+                Update::Picked(path) => {
+                    if let Some(path) = path {
+                        state.input = path;
+                        state.pending_key = Some(KeyCode::Enter);
+                    }
+                }
                 Update::Done(tab, result) => {
                     state.busy = false;
                     if tab == 6 {
@@ -2802,6 +3009,9 @@ fn terminal(
                                 state.phone_audio = false;
                             }
                             let answer = value["text"].as_str().unwrap_or_default();
+                            if tab == 1 && !state.lab && !answer.trim().is_empty() {
+                                state.plain_log.push((false, answer.trim().to_owned()));
+                            }
                             state.outputs[tab] = if value.get("history").is_some() {
                                 format!(
                                     "{}\n\nyou> {}\n\n3Yiddish> {}",
@@ -2871,6 +3081,50 @@ fn terminal(
                 state.published_game = game;
             }
         }
+        // Follow the microphone while recording (demo mode makes up a voice).
+        let live = state.recording.as_ref().map(|r| r.level()).or_else(|| {
+            state.demo_rec.map(|at| {
+                let t = at.elapsed().as_secs_f32();
+                ((t * 7.0).sin() * (t * 2.3).sin()).abs() * 0.22
+                    + (noise((t * 20.0) as u64, 3) % 100) as f32 / 1500.0
+            })
+        });
+        match live {
+            Some(level) => {
+                if state.rec_started.is_none() {
+                    state.rec_started = Some(std::time::Instant::now());
+                    state.levels.clear();
+                }
+                state.levels.push(level);
+            }
+            None => state.rec_started = None,
+        }
+        // A voice note stops at its end.
+        if let Some(play) = &state.voice_play {
+            let seconds = state.voices.get(&play.index).map_or(0.0, |v| v.seconds);
+            let finished = state.playback.as_mut().is_some_and(|p| p.done());
+            if finished || (seconds > 0.0 && play.position() >= seconds) {
+                state.voice_play = None;
+                state.playback = None;
+            }
+        }
+        // Alerts in the plain app go away by themselves after a few seconds.
+        if state.notice.is_empty() {
+            state.notice_since = None;
+        } else if state
+            .notice_since
+            .as_ref()
+            .is_none_or(|(text, _)| *text != state.notice)
+        {
+            state.notice_since = Some((state.notice.clone(), std::time::Instant::now()));
+        } else if plain(&state)
+            && state
+                .notice_since
+                .as_ref()
+                .is_some_and(|(_, at)| at.elapsed().as_secs() >= 4)
+        {
+            state.notice.clear();
+        }
         let mut hits = Vec::new();
         terminal.draw(|f| {
             hits = draw(f, &state, &watches);
@@ -2878,11 +3132,16 @@ fn terminal(
         let key = if let Some(code) = state.pending_key.take() {
             KeyEvent::new(code, KeyModifiers::NONE)
         } else {
-            if !event::poll(Duration::from_millis(100))? {
+            // The plain app animates, so it redraws twice as often.
+            if !event::poll(Duration::from_millis(if plain(&state) { 50 } else { 100 }))? {
                 continue;
             }
             match event::read()? {
                 Event::Key(key) => key,
+                Event::Paste(text) => {
+                    attach_text(&mut state, &text);
+                    continue;
+                }
                 Event::Mouse(mouse) => match mouse.kind {
                     MouseEventKind::ScrollUp => {
                         scroll_view(&mut state, true, 3);
@@ -2942,6 +3201,25 @@ fn terminal(
                             }
                             Click::Tab(tab) => {
                                 select_tab(&mut state, tab);
+                                continue;
+                            }
+                            Click::Attach => {
+                                pick_file(eval_tx.clone());
+                                continue;
+                            }
+                            Click::VoiceToggle(index) => {
+                                voice_toggle(&mut state, index);
+                                continue;
+                            }
+                            Click::VoiceSeek(index, permille) => {
+                                voice_seek(&mut state, index, permille);
+                                continue;
+                            }
+                            Click::CopyAt(index) => {
+                                if let Some((_, text)) = state.plain_log.get(index).cloned() {
+                                    copy_text(&mut state, &text);
+                                    state.copied = Some((index, std::time::Instant::now()));
+                                }
                                 continue;
                             }
                             Click::Key(code) => code,
@@ -3145,6 +3423,61 @@ fn terminal(
         if key.kind != KeyEventKind::Press {
             continue;
         }
+        if plain(&state) {
+            // THREE_YIDDISH_DEMO: canned replies, for trying the screen without a microphone.
+            let demo = std::env::var_os("THREE_YIDDISH_DEMO").is_some();
+            match key.code {
+                KeyCode::Enter if !state.busy && !state.input.trim().is_empty() => {
+                    let text = state.input.trim().to_owned();
+                    if let Some(name) = Path::new(&text)
+                        .is_file()
+                        .then(|| Path::new(&text).file_name())
+                        .flatten()
+                    {
+                        let name = name.to_string_lossy().into_owned();
+                        state.voices.insert(
+                            state.plain_log.len(),
+                            Voice {
+                                path: PathBuf::from(&text),
+                                seconds: 0.0,
+                                peaks: Vec::new(),
+                            },
+                        );
+                        let _ = name;
+                        state.plain_log.push((true, String::new()));
+                    } else if demo {
+                        state.plain_log.push((true, text));
+                        state.input.clear();
+                        demo_reply(&mut state, eval_tx.clone());
+                        continue;
+                    } else {
+                        state.notice = "That is not an audio file.".into();
+                        continue;
+                    }
+                }
+                KeyCode::F(10) if demo && !state.busy && state.recording.is_none() => {
+                    // First click starts a pretend recording, the second sends it.
+                    match state.demo_rec.take() {
+                        None => state.demo_rec = Some(std::time::Instant::now()),
+                        Some(at) => {
+                            let seconds = at.elapsed().as_secs_f32();
+                            state.voices.insert(
+                                state.plain_log.len(),
+                                Voice {
+                                    path: PathBuf::new(),
+                                    seconds,
+                                    peaks: peaks(&state.levels),
+                                },
+                            );
+                            state.plain_log.push((true, String::new()));
+                            demo_reply(&mut state, eval_tx.clone());
+                        }
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 let recording = state.recording.is_some()
@@ -3172,6 +3505,9 @@ fn terminal(
                 }
             }
             KeyCode::Esc => break,
+            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                paste_clipboard(&mut state);
+            }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
             KeyCode::Tab => {
                 let tab = next_tab(state.tab, 1);
@@ -3376,6 +3712,1114 @@ fn terminal(
         refresh: None,
     })
 }
+/// The regular app: one centered column. Logo on top, transcripts as message cards, and a
+/// typing box at the bottom with square buttons on both sides (attach left, record/send right).
+fn plain(state: &Screen) -> bool {
+    !state.lab && state.tab == 1
+}
+/// The plain app takes its colors from the terminal theme (ANSI), so it matches the desktop.
+const THEME_ACCENT: Color = Color::Blue;
+const THEME_RECORD: Color = Color::Red;
+fn started() -> std::time::Instant {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *START.get_or_init(std::time::Instant::now)
+}
+fn noise(a: u64, b: u64) -> u64 {
+    let mut x = a.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ b.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    x ^= x >> 31;
+    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x ^ (x >> 29)
+}
+/// Live background: Yiddish letters raining in two layers, a dim slow one far away and a
+/// slightly brighter faster one up close, all very faint. The wallpaper shows between.
+fn draw_rain(frame: &mut Frame, area: Rect) {
+    const LETTERS: [char; 22] = [
+        'א', 'ב', 'ג', 'ד', 'ה', 'ו', 'ז', 'ח', 'ט', 'י', 'כ', 'ל', 'מ', 'נ', 'ס', 'ע', 'פ', 'צ',
+        'ק', 'ר', 'ש', 'ת',
+    ];
+    let t = started().elapsed().as_secs_f32();
+    let (accent, _) = theme_rgb();
+    let height = area.height as f32;
+    if area.height == 0 {
+        return;
+    }
+    let buffer = frame.buffer_mut();
+    // (layer, one column in N, slowest speed, speed range, shortest trail, brightness)
+    for (layer, every, slow, range, short, bright) in [
+        (1u64, 5u64, 0.8f32, 2.0f32, 6u64, 0.30f32),
+        (2, 12, 4.0, 5.0, 4, 0.38),
+    ] {
+        for column in 0..area.width {
+            let seed = noise(column as u64, layer * 101);
+            if !seed.is_multiple_of(every) {
+                continue;
+            }
+            let speed = slow + ((seed >> 8) % 100) as f32 / 100.0 * range;
+            let trail = short + (seed >> 16) % 6;
+            let span = height + trail as f32 + ((seed >> 24) % 40) as f32;
+            let head = (t * speed + ((seed >> 32) % 1000) as f32) % span;
+            for k in 0..trail {
+                let row = head - k as f32;
+                if row < 0.0 || row >= height {
+                    continue;
+                }
+                // Letters flicker now and then, slower further up the trail.
+                let tick = (t * 2.5) as u64 / (1 + k);
+                let letter =
+                    LETTERS[(noise(column as u64 * 977 + row as u64, tick + layer) % 22) as usize];
+                // A narrow band of mid tones: never bright, never black, so the letters sit
+                // quietly on light and dark wallpaper alike.
+                let fade = bright * (0.8 + 0.2 * (1.0 - k as f32 / trail as f32));
+                let color = if k == 0 {
+                    // The head is only a little brighter than its trail.
+                    let glow = |v: u8| (v as f32 * (bright + 0.06)) as u8;
+                    Color::Rgb(glow(accent[0]), glow(accent[1]), glow(accent[2]))
+                } else {
+                    let dim = |v: u8| (v as f32 * fade) as u8;
+                    Color::Rgb(dim(accent[0]), dim(accent[1]), dim(accent[2]))
+                };
+                buffer[(area.x + column, area.y + row as u16)]
+                    .set_char(letter)
+                    .set_fg(color);
+            }
+        }
+    }
+}
+struct Graphics {
+    picker: ratatui_image::picker::Picker,
+    cache: std::collections::HashMap<(String, u16, u16), ratatui_image::protocol::Protocol>,
+    accent: [u8; 3],
+    record: [u8; 3],
+    dark: [u8; 3],
+}
+thread_local! {
+    static GRAPHICS: std::cell::RefCell<Option<Graphics>> = const { std::cell::RefCell::new(None) };
+}
+/// Ask the terminal whether it can draw images (Kitty, iTerm2 or Sixel), and for the theme's
+/// accent and red so the art matches the desktop. Without images the app draws characters.
+fn init_graphics() {
+    use ratatui_image::picker::{Picker, ProtocolType};
+    let Ok(picker) = Picker::from_query_stdio() else {
+        return;
+    };
+    if picker.protocol_type() == ProtocolType::Halfblocks {
+        return;
+    }
+    let (accent, record, dark) =
+        theme_colors().unwrap_or(([107, 224, 211], [255, 119, 143], [29, 39, 52]));
+    GRAPHICS.with(|g| {
+        *g.borrow_mut() = Some(Graphics {
+            picker,
+            cache: std::collections::HashMap::new(),
+            accent,
+            record,
+            dark,
+        })
+    });
+}
+fn theme_rgb() -> ([u8; 3], [u8; 3]) {
+    GRAPHICS.with(|g| {
+        g.borrow()
+            .as_ref()
+            .map_or(([107, 224, 211], [255, 119, 143]), |g| (g.accent, g.record))
+    })
+}
+/// The terminal theme's blue, red and dark tone (ANSI 4, 1 and 0), asked over the terminal itself. The
+/// device-attributes request at the end is always answered, so the read cannot hang on a
+/// terminal that ignores the color question.
+#[cfg(unix)]
+fn theme_colors() -> Option<([u8; 3], [u8; 3], [u8; 3])> {
+    use std::io::{Read, Write};
+    let mut out = std::io::stdout();
+    out.write_all(b"\x1b]4;4;?\x07\x1b]4;1;?\x07\x1b]4;0;?\x07\x1b[c")
+        .ok()?;
+    out.flush().ok()?;
+    let mut reply = Vec::new();
+    let mut stdin = std::io::stdin().lock();
+    let mut byte = [0u8; 1];
+    // Ends with the attributes answer: ESC [ ? ... c
+    while reply.len() < 512 {
+        stdin.read_exact(&mut byte).ok()?;
+        reply.push(byte[0]);
+        if byte[0] == b'c' && reply.iter().rev().take(40).any(|b| *b == b'[') {
+            let tail = String::from_utf8_lossy(&reply);
+            if tail.rfind("\x1b[?").is_some() {
+                break;
+            }
+        }
+    }
+    let text = String::from_utf8_lossy(&reply);
+    let color = |index: u8| -> Option<[u8; 3]> {
+        let start = text.find(&format!("]4;{index};rgb:"))? + format!("]4;{index};rgb:").len();
+        let mut parts = text[start..].split(|c: char| !c.is_ascii_hexdigit());
+        let mut channel = || u8::from_str_radix(parts.next()?.get(..2)?, 16).ok();
+        Some([channel()?, channel()?, channel()?])
+    };
+    Some((color(4)?, color(1)?, color(0)?))
+}
+#[cfg(not(unix))]
+fn theme_colors() -> Option<([u8; 3], [u8; 3], [u8; 3])> {
+    None
+}
+/// How many columns a piece of art needs when it fills `rows` rows, scaled by a whole number.
+fn art_columns(width: u32, height: u32, rows: u16) -> Option<u16> {
+    GRAPHICS.with(|g| {
+        let g = g.borrow();
+        let font = g.as_ref()?.picker.font_size();
+        let scale = (rows as u32 * font.height as u32) / height;
+        (scale > 0).then(|| (width * scale).div_ceil(font.width as u32) as u16)
+    })
+}
+/// Draw pixel art in `area`, scaled by a whole number so every pixel stays square and crisp.
+/// False when the terminal cannot draw images or the art does not fit.
+fn pixel_art(
+    frame: &mut Frame,
+    area: Rect,
+    key: &str,
+    centered: bool,
+    art: impl FnOnce() -> image::RgbaImage,
+) -> bool {
+    GRAPHICS.with(|g| {
+        let mut g = g.borrow_mut();
+        let Some(g) = g.as_mut() else { return false };
+        let id = (key.to_owned(), area.width, area.height);
+        if !g.cache.contains_key(&id) {
+            let font = g.picker.font_size();
+            let (w, h) = (
+                area.width as u32 * font.width as u32,
+                area.height as u32 * font.height as u32,
+            );
+            let art = art();
+            let scale = (w / art.width()).min(h / art.height());
+            if scale == 0 {
+                return false;
+            }
+            let scaled = image::imageops::resize(
+                &art,
+                art.width() * scale,
+                art.height() * scale,
+                image::imageops::FilterType::Nearest,
+            );
+            let mut canvas = image::RgbaImage::new(w, h);
+            let x = if centered {
+                (w - scaled.width()) / 2
+            } else {
+                0
+            };
+            image::imageops::overlay(
+                &mut canvas,
+                &scaled,
+                x as i64,
+                ((h - scaled.height()) / 2) as i64,
+            );
+            let Ok(protocol) = g.picker.new_protocol(
+                image::DynamicImage::ImageRgba8(canvas),
+                area.as_size(),
+                ratatui_image::Resize::Fit(None),
+            ) else {
+                return false;
+            };
+            g.cache.insert(id.clone(), protocol);
+        }
+        frame.render_widget(ratatui_image::Image::new(&g.cache[&id]), area);
+        true
+    })
+}
+/// How wide a round button is, in columns: as wide as two rows are tall.
+fn button_columns() -> u16 {
+    GRAPHICS.with(|g| {
+        g.borrow().as_ref().map_or(3, |g| {
+            let font = g.picker.font_size();
+            (font.height * 2).div_ceil(font.width.max(1))
+        })
+    })
+}
+/// A block of screen cells drawn as one image of exactly its size. False without image support.
+fn pixel_cell(
+    frame: &mut Frame,
+    cell: Rect,
+    key: &str,
+    make: impl FnOnce(u32, u32) -> image::RgbaImage,
+) -> bool {
+    GRAPHICS.with(|g| {
+        let mut g = g.borrow_mut();
+        let Some(g) = g.as_mut() else { return false };
+        let id = (key.to_owned(), cell.width, cell.height);
+        if !g.cache.contains_key(&id) {
+            let font = g.picker.font_size();
+            let image = make(
+                font.width as u32 * cell.width as u32,
+                font.height as u32 * cell.height as u32,
+            );
+            let Ok(protocol) = g.picker.new_protocol(
+                image::DynamicImage::ImageRgba8(image),
+                cell.as_size(),
+                ratatui_image::Resize::Fit(None),
+            ) else {
+                return false;
+            };
+            g.cache.insert(id.clone(), protocol);
+        }
+        frame.render_widget(ratatui_image::Image::new(&g.cache[&id]), cell);
+        true
+    })
+}
+/// The theme's dark tone, when the terminal draws images (so bubbles get truly round ends).
+fn round_theme() -> Option<[u8; 3]> {
+    GRAPHICS.with(|g| g.borrow().as_ref().map(|g| g.dark))
+}
+/// A square button with a drawn icon.
+#[allow(clippy::too_many_arguments)]
+fn square(
+    frame: &mut Frame,
+    hits: &mut Vec<Hit>,
+    area: Rect,
+    (art, icon): (&str, &[&str]),
+    color: Color,
+    action: Click,
+    enabled: bool,
+) {
+    let color = if enabled { color } else { Color::DarkGray };
+    // Real pixel art when the terminal can draw images; characters otherwise.
+    let (accent, record) = theme_rgb();
+    let rgb = match color {
+        THEME_ACCENT => accent,
+        THEME_RECORD => record,
+        _ => [110, 118, 140],
+    };
+    if area.height >= 3
+        && let Some(dark) = round_theme()
+    {
+        let key = format!("button-{art}-{rgb:?}");
+        if pixel_cell(frame, area, &key, |w, h| {
+            crate::art::button(w, h, art, rgb, dark)
+        }) {
+            if enabled {
+                hits.push(Hit { area, action });
+            }
+            return;
+        }
+    }
+    let key = format!("{art}-{rgb:?}");
+    // As much air between box and icon as the row height allows.
+    let size = GRAPHICS.with(|g| {
+        g.borrow().as_ref().map_or(16, |g| {
+            u32::from(g.picker.font_size().height).clamp(16, 20) / 2 * 2
+        })
+    });
+    if pixel_art(frame, area, &key, true, || crate::art::tile(art, rgb, size)) {
+        if enabled {
+            hits.push(Hit { area, action });
+        }
+        return;
+    }
+    if area.height < 3 {
+        frame.render_widget(
+            Paragraph::new(format!("[{}]", icon[0]))
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            area,
+        );
+        if enabled {
+            hits.push(Hit { area, action });
+        }
+        return;
+    }
+    frame.render_widget(
+        Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(color)),
+        area,
+    );
+    let top = area.y + area.height.saturating_sub(icon.len() as u16) / 2;
+    for (i, line) in icon.iter().enumerate() {
+        frame.render_widget(
+            Paragraph::new(*line)
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Rect::new(area.x + 1, top + i as u16, area.width.saturating_sub(2), 1),
+        );
+    }
+    if enabled {
+        hits.push(Hit { area, action });
+    }
+}
+fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
+    let mut hits = Vec::new();
+    let screen = frame.area();
+    frame.render_widget(
+        Block::default().style(Style::default().fg(Color::Reset).bg(Color::Reset)),
+        screen,
+    );
+    if screen.width < 40 || screen.height < 16 {
+        frame.render_widget(Paragraph::new("3Yiddish\nMake the window bigger."), screen);
+        return hits;
+    }
+    let margin = if screen.width >= 80 { 2 } else { 1 };
+    let area = Rect::new(
+        screen.x + margin,
+        screen.y + 1,
+        screen.width - margin * 2,
+        screen.height - 2,
+    );
+    // The top bar is three rows (its content sits on the middle one), like the typing bar.
+    let head = area.y + 1;
+    let active = recording(state);
+    let side_w = button_columns();
+    // The typing bar: its text row, with half a row of padding above and below.
+    let bar_y = area.bottom() - 2;
+    // The rain stays between the top bar and the typing bar.
+    draw_rain(
+        frame,
+        Rect::new(
+            screen.x,
+            area.y + 4,
+            screen.width,
+            bar_y.saturating_sub(area.y + 6),
+        ),
+    );
+    // One slim row: logo on the left; updates, refresh and quit on the right.
+    let (accent, record) = theme_rgb();
+    let big = art_columns(86, 14, 2).filter(|w| area.width >= w + 2 * side_w + 6);
+    if let Some(w) = big {
+        // A bit smaller than the buttons, centered on the bar's three rows.
+        pixel_cell(
+            frame,
+            Rect::new(area.x, area.y, w, 3),
+            "logo-big",
+            |cw, ch| {
+                let art = crate::art::logo(accent, record);
+                let scale = ((ch * 4 / 9) / art.height()).max(1);
+                let scaled = image::imageops::resize(
+                    &art,
+                    art.width() * scale,
+                    art.height() * scale,
+                    image::imageops::FilterType::Nearest,
+                );
+                let mut canvas = image::RgbaImage::new(cw, ch);
+                image::imageops::overlay(
+                    &mut canvas,
+                    &scaled,
+                    0,
+                    (ch.saturating_sub(scaled.height()) / 2) as i64,
+                );
+                canvas
+            },
+        );
+    }
+    match art_columns(86, 14, 1).filter(|w| big.is_none() && area.width >= w + 16) {
+        _ if big.is_some() => {}
+        Some(w) => {
+            pixel_art(frame, Rect::new(area.x, head, w, 1), "logo", false, || {
+                crate::art::logo(accent, record)
+            });
+        }
+        None => frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("3", Style::default().fg(THEME_RECORD)),
+                Span::styled("YIDDISH", Style::default().fg(THEME_ACCENT)),
+            ]))
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+            Rect::new(area.x, head, 10, 1),
+        ),
+    }
+    // Where the logo ends, so alerts never write over it.
+    // (The big logo is drawn at two thirds of the room kept for it.)
+    let logo_end = area.x
+        + big
+            .map(|w| w * 2 / 3 + 1)
+            .or_else(|| art_columns(86, 14, 1))
+            .unwrap_or(8)
+        + 2;
+    let mut tools: Vec<Control> = Vec::new();
+    if state.app_update.is_some() {
+        tools.push(("Update app", Click::UpdateApp, !state.upgrading && !active));
+    }
+    if let Some(label) = &state.model_update {
+        tools.push((
+            if label == "first" {
+                "Get model"
+            } else {
+                "New model"
+            },
+            Click::UpdateModel,
+            !state.upgrading && !active,
+        ));
+    }
+    let mut x = area.right();
+    for (icon, color, action, enabled) in [
+        (("close", "✕"), THEME_RECORD, Click::Key(KeyCode::Esc), true),
+        (
+            ("refresh", "↻"),
+            THEME_ACCENT,
+            Click::Key(KeyCode::Char('r')),
+            !state.busy && !active,
+        ),
+    ] {
+        x -= side_w;
+        square(
+            frame,
+            &mut hits,
+            Rect::new(x, area.y, side_w, 3),
+            (icon.0, &[icon.1]),
+            color,
+            action,
+            enabled,
+        );
+        x -= 1;
+    }
+    for (label, action, enabled) in tools.iter().rev() {
+        let text = format!(" {label} ");
+        let w = text.chars().count() as u16;
+        x = x.saturating_sub(w);
+        let chip = Rect::new(x, head, w, 1);
+        frame.render_widget(
+            Paragraph::new(text).style(
+                Style::default()
+                    .fg(if *enabled {
+                        Color::Black
+                    } else {
+                        Color::DarkGray
+                    })
+                    .bg(THEME_ACCENT),
+            ),
+            chip,
+        );
+        if *enabled {
+            hits.push(Hit {
+                area: chip,
+                action: *action,
+            });
+        }
+        x = x.saturating_sub(1);
+    }
+    let status = if active {
+        "● Recording"
+    } else if state.busy {
+        "◌ Transcribing"
+    } else {
+        ""
+    };
+    let status_w = status.chars().count() as u16;
+    frame.render_widget(
+        Paragraph::new(status).style(Style::default().fg(if active {
+            THEME_RECORD
+        } else {
+            Color::DarkGray
+        })),
+        Rect::new(x.saturating_sub(status_w + 1), head, status_w, 1),
+    );
+    // Alerts live in the top bar, between the logo and the buttons.
+    if !state.notice.is_empty() {
+        let left = logo_end;
+        let right = x.saturating_sub(status_w + 2);
+        if right > left + 8 {
+            // Centered on the window itself; nudged only if it would touch the logo or buttons.
+            let text: String = clean(&state.notice)
+                .replace('\n', " ")
+                .chars()
+                .take((right - left) as usize)
+                .collect();
+            let width = text.chars().count() as u16;
+            let start = (area.x + area.width.saturating_sub(width) / 2)
+                .min(right - width)
+                .max(left);
+            frame.render_widget(
+                Paragraph::new(text).style(Style::default().fg(THEME_ACCENT)),
+                Rect::new(start, head, width, 1),
+            );
+        }
+    }
+    frame.render_widget(
+        Paragraph::new("▔".repeat(area.width as usize)).style(Style::default().fg(Color::DarkGray)),
+        Rect::new(area.x, area.y + 3, area.width, 1),
+    );
+    // And one above the bar; both hug it (drawn on the near edge of their rows).
+    frame.render_widget(
+        Paragraph::new("▁".repeat(area.width as usize)).style(Style::default().fg(Color::DarkGray)),
+        Rect::new(area.x, area.y - 1, area.width, 1),
+    );
+    // Bottom: one slim row, edge to edge: plus, the typing line, mic/send.
+    let typed = !state.input.trim().is_empty();
+    square(
+        frame,
+        &mut hits,
+        Rect::new(area.x, bar_y - 1, side_w, 3),
+        ("plus", &["+"]),
+        THEME_ACCENT,
+        Click::Attach,
+        !active && !state.busy,
+    );
+    let (icon, color, action, enabled): ((&str, &[&str]), Color, Click, bool) = if active {
+        (("stop", &["■"]), THEME_RECORD, Click::Record, true)
+    } else if typed {
+        (
+            ("send", &["➤"]),
+            THEME_ACCENT,
+            Click::Key(KeyCode::Enter),
+            !state.busy,
+        )
+    } else {
+        (("mic", &["●"]), THEME_RECORD, Click::Record, !state.busy)
+    };
+    square(
+        frame,
+        &mut hits,
+        Rect::new(area.right() - side_w, bar_y - 1, side_w, 3),
+        icon,
+        color,
+        action,
+        enabled,
+    );
+    let box_area = Rect::new(
+        area.x + side_w + 1,
+        bar_y,
+        area.width.saturating_sub(2 * side_w + 2),
+        1,
+    );
+    let inner = box_area.width.saturating_sub(2) as usize;
+    let line = if active {
+        // Recording: the bar is the live voice, newest on the right, with a running timer.
+        const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        let timer = format!(
+            " {} ",
+            clock(
+                state
+                    .rec_started
+                    .map_or(0.0, |at| at.elapsed().as_secs_f32())
+            )
+        );
+        let room = inner.saturating_sub(timer.chars().count() + 1);
+        let recent = &state.levels[state.levels.len().saturating_sub(room)..];
+        let wave: String = std::iter::repeat_n('▁', room - recent.len())
+            .chain(recent.iter().map(|l| LEVELS[bar(*l) as usize]))
+            .collect();
+        Line::from(vec![
+            Span::styled(timer, Style::default().fg(THEME_RECORD)),
+            Span::styled(wave, Style::default().fg(THEME_RECORD)),
+        ])
+    } else if typed {
+        let chars: Vec<char> = state.input.chars().collect();
+        Line::from(format!(
+            " {}▏",
+            chars[chars.len().saturating_sub(inner.saturating_sub(1))..]
+                .iter()
+                .collect::<String>()
+        ))
+    } else {
+        Line::from(Span::styled(
+            " Speak, or drop / Ctrl+V a recording",
+            Style::default().fg(Color::DarkGray),
+        ))
+    };
+    // The typing bar is a fat rounded bubble: the text row plus half a row above and below,
+    // with corners drawn as real pixels when the terminal can.
+    let dark = round_theme();
+    let fill = dark.map_or(Color::Black, |d| Color::Rgb(d[0], d[1], d[2]));
+    frame.render_widget(
+        Paragraph::new(line).style(Style::default().bg(fill)),
+        box_area,
+    );
+    if box_area.width > 4 {
+        let edge = (box_area.width - 2) as usize;
+        for (row, half, top) in [(bar_y - 1, "▄", true), (bar_y + 1, "▀", false)] {
+            frame.render_widget(
+                Paragraph::new(half.repeat(edge)).style(Style::default().fg(fill)),
+                Rect::new(box_area.x + 1, row, box_area.width - 2, 1),
+            );
+            if let Some(dark) = dark {
+                for left in [true, false] {
+                    let x = if left {
+                        box_area.x
+                    } else {
+                        box_area.right() - 1
+                    };
+                    let key = format!("half-{left}-{top}-{dark:?}");
+                    pixel_cell(frame, Rect::new(x, row, 1, 1), &key, |cw, ch| {
+                        crate::art::half_cap(cw, ch, dark, left, top)
+                    });
+                }
+            }
+        }
+    }
+    frame.render_widget(
+        Paragraph::new("▁".repeat(area.width as usize)).style(Style::default().fg(Color::DarkGray)),
+        Rect::new(area.x, bar_y - 2, area.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new("▔".repeat(area.width as usize)).style(Style::default().fg(Color::DarkGray)),
+        Rect::new(area.x, bar_y + 2, area.width, 1),
+    );
+    // Messages, newest at the bottom, sized to their text. What you sent is on the right in
+    // the accent color; transcripts come in on the left. Clicking a transcript copies it.
+    let top = area.y + 5;
+    let mut y = bar_y.saturating_sub(4);
+    let top = top + 1;
+    let text_width = (area.width as usize * 3 / 4).clamp(20, 76);
+    // A bubble. With image support its ends are truly round (drawn pixel by pixel) and it is
+    // exactly as tall as its text; otherwise half-blocks soften the edges.
+    let round = round_theme();
+    let (accent, _) = theme_rgb();
+    let bubble = |frame: &mut Frame,
+                  y: u16,
+                  lines: Vec<Line<'static>>,
+                  inner: u16,
+                  (fg, bg): (Color, Color),
+                  right: bool| {
+        let h = lines.len() as u16;
+        let w = (inner + 4).min(area.width);
+        let x = if right { area.right() - w } else { area.x };
+        // Wipe whatever the background drew here first, so no letters show through.
+        let wipe = if round.is_some() {
+            Rect::new(x, y, w, h)
+        } else {
+            Rect::new(x, y - 1, w, h + 2)
+        };
+        frame.render_widget(ratatui::widgets::Clear, wipe);
+        if let Some(dark) = round {
+            let rgb = if bg == THEME_ACCENT { accent } else { dark };
+            let fill = Color::Rgb(rgb[0], rgb[1], rgb[2]);
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .alignment(Alignment::Right)
+                    .style(Style::default().fg(fg).bg(fill))
+                    .block(Block::default().padding(ratatui::widgets::Padding::horizontal(1))),
+                Rect::new(x + 1, y, w - 2, h),
+            );
+            for row in 0..h {
+                let (top, bottom) = (row == 0, row + 1 == h);
+                for left in [true, false] {
+                    let cell = Rect::new(if left { x } else { x + w - 1 }, y + row, 1, 1);
+                    if !top && !bottom {
+                        frame
+                            .render_widget(Block::default().style(Style::default().bg(fill)), cell);
+                        continue;
+                    }
+                    let key = format!("cap-{left}-{top}-{bottom}-{rgb:?}");
+                    pixel_cell(frame, cell, &key, |cw, ch| {
+                        crate::art::cap(cw, ch, rgb, left, top, bottom)
+                    });
+                }
+            }
+            return Rect::new(x, y, w, h);
+        }
+        let cap = Style::default().fg(bg);
+        for row in y..y + h {
+            frame.render_widget(Paragraph::new("▐").style(cap), Rect::new(x, row, 1, 1));
+            frame.render_widget(
+                Paragraph::new("▌").style(cap),
+                Rect::new(x + w - 1, row, 1, 1),
+            );
+        }
+        // Half a row of padding above and below.
+        let edge = (w - 2) as usize;
+        frame.render_widget(
+            Paragraph::new("▄".repeat(edge)).style(cap),
+            Rect::new(x + 1, y - 1, w - 2, 1),
+        );
+        frame.render_widget(
+            Paragraph::new("▀".repeat(edge)).style(cap),
+            Rect::new(x + 1, y + h, w - 2, 1),
+        );
+        frame.render_widget(
+            Paragraph::new(lines)
+                .alignment(Alignment::Right)
+                .style(Style::default().fg(fg).bg(bg))
+                .block(Block::default().padding(ratatui::widgets::Padding::horizontal(1))),
+            Rect::new(x + 1, y, w - 2, h),
+        );
+        Rect::new(x, y - 1, w, h + 2)
+    };
+    // Round bubbles sit one row apart; the half-block kind needs its padding rows too.
+    let gap = if round.is_some() { 1 } else { 2 };
+    if round.is_some() {
+        y += 1;
+    }
+    if state.busy {
+        // Thinking: a little sound wave, rolling, with a bright crest sweeping through it.
+        const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        let t = started().elapsed().as_secs_f32();
+        let (accent, _) = theme_rgb();
+        let bars: Vec<Span> = (0..14)
+            .map(|i| {
+                let x = i as f32;
+                let wave = (t * 5.0 + x * 0.9).sin() * 0.5 + (t * 3.1 - x * 0.5).sin() * 0.5;
+                let level = (((wave + 1.0) / 2.0) * 7.0).round() as usize;
+                let crest = ((t * 9.0) % 20.0 - x).abs();
+                let glow = (1.0 - crest / 4.0).clamp(0.35, 1.0);
+                let c = |v: u8| (v as f32 * glow) as u8;
+                Span::styled(
+                    LEVELS[level.min(7)].to_string(),
+                    Style::default().fg(Color::Rgb(c(accent[0]), c(accent[1]), c(accent[2]))),
+                )
+            })
+            .collect();
+        y = y.saturating_sub(1);
+        bubble(
+            frame,
+            y,
+            vec![Line::from(bars)],
+            14,
+            (Color::Reset, Color::Black),
+            false,
+        );
+        y = y.saturating_sub(gap);
+    }
+    for (index, (mine, text)) in state.plain_log.iter().enumerate().rev() {
+        let body = visual(&clean(text), text_width);
+        let mut lines: Vec<Line> = body.lines().map(|l| Line::from(l.to_owned())).collect();
+        let mut inner = body.lines().map(|l| l.chars().count()).max().unwrap_or(1) as u16;
+        let voice = state.voices.get(&index);
+        if let (Some(dark), Some(voice)) = (round, voice) {
+            // Drawn with pixels: a fat, short bubble (see `draw_voice`).
+            if y < top + 3 {
+                break;
+            }
+            y -= 3;
+            let w = VOICE_WIDTH.min(area.width);
+            draw_voice(
+                frame,
+                &mut hits,
+                state,
+                (index, voice),
+                Rect::new(area.right() - w, y, w, 3),
+                (accent, dark),
+            );
+            y = y.saturating_sub(gap);
+            continue;
+        }
+        // Without image support: play/pause, the wave in characters, and the time.
+        if let Some(voice) = voice {
+            const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+            let play = state.voice_play.as_ref().filter(|p| p.index == index);
+            let position = play.map_or(0.0, |p| p.position());
+            let done = if voice.seconds > 0.0 {
+                ((position / voice.seconds) * PEAKS as f32) as usize
+            } else {
+                0
+            };
+            let rest = Style::default().fg(match round {
+                Some(_) => Color::Rgb(
+                    (accent[0] as f32 * 0.55) as u8,
+                    (accent[1] as f32 * 0.55) as u8,
+                    (accent[2] as f32 * 0.55) as u8,
+                ),
+                None => Color::DarkGray,
+            });
+            let mut spans = vec![Span::raw(if play.is_some_and(|p| !p.paused) {
+                "▮▮ "
+            } else {
+                "▶  "
+            })];
+            for i in 0..PEAKS {
+                let glyph = match voice.peaks.get(i * voice.peaks.len() / PEAKS) {
+                    Some(level) => LEVELS[(*level / 32) as usize],
+                    None if i < done => '━',
+                    None => '─',
+                };
+                spans.push(if i < done {
+                    Span::raw(glyph.to_string())
+                } else {
+                    Span::styled(glyph.to_string(), rest)
+                });
+            }
+            let shown = if play.is_some() {
+                position
+            } else {
+                voice.seconds
+            };
+            spans.push(Span::raw(format!(" {}", clock(shown))));
+            if text.is_empty() {
+                lines.clear();
+            }
+            lines.push(Line::from(spans));
+            inner = inner.max(PEAKS as u16 + 8);
+        }
+        let h = lines.len().max(1) as u16;
+        if y < top + h {
+            break;
+        }
+        y -= h;
+        let copied = state
+            .copied
+            .is_some_and(|(i, at)| i == index && at.elapsed().as_millis() < 1200);
+        let colors = if *mine {
+            (Color::Black, THEME_ACCENT)
+        } else if copied {
+            (THEME_ACCENT, Color::Black)
+        } else {
+            (Color::Reset, Color::Black)
+        };
+        let rect = bubble(frame, y, lines, inner, colors, *mine);
+        if voice.is_some() {
+            // The player is the bubble's last row: text starts two columns in.
+            let row = rect.bottom() - if round.is_some() { 1 } else { 2 };
+            let start = rect.right().saturating_sub(2 + PEAKS as u16 + 8);
+            hits.push(Hit {
+                area: Rect::new(start, row, 3, 1),
+                action: Click::VoiceToggle(index),
+            });
+            for i in 0..PEAKS as u16 {
+                hits.push(Hit {
+                    area: Rect::new(start + 3 + i, row, 1, 1),
+                    action: Click::VoiceSeek(index, i * 1000 / PEAKS as u16),
+                });
+            }
+        }
+        if !*mine {
+            hits.push(Hit {
+                area: rect,
+                action: Click::CopyAt(index),
+            });
+        }
+        y = y.saturating_sub(gap);
+    }
+    hits
+}
+/// Columns of a voice note: end, button, wave, time, end.
+const VOICE_WAVE: u16 = 16;
+const VOICE_WIDTH: u16 = 1 + 4 + VOICE_WAVE + 6 + 1;
+/// A voice note as a fat bubble three rows tall (the middle row plus half a row either
+/// side): a play/pause button, the wave as a slider with the played part dark, the time.
+fn draw_voice(
+    frame: &mut Frame,
+    hits: &mut Vec<Hit>,
+    state: &Screen,
+    (index, voice): (usize, &Voice),
+    rect: Rect,
+    (accent, dark): ([u8; 3], [u8; 3]),
+) {
+    let fill = Color::Rgb(accent[0], accent[1], accent[2]);
+    let ink = Color::Rgb(dark[0], dark[1], dark[2]);
+    let (x, y, w) = (rect.x, rect.y + 1, rect.width);
+    frame.render_widget(ratatui::widgets::Clear, rect);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(fill)),
+        Rect::new(x, y, w, 1),
+    );
+    for (row, half, top) in [(y - 1, "▄", true), (y + 1, "▀", false)] {
+        frame.render_widget(
+            Paragraph::new(half.repeat(w.saturating_sub(2) as usize))
+                .style(Style::default().fg(fill)),
+            Rect::new(x + 1, row, w.saturating_sub(2), 1),
+        );
+        for left in [true, false] {
+            let cx = if left { x } else { x + w - 1 };
+            pixel_cell(
+                frame,
+                Rect::new(cx, row, 1, 1),
+                &format!("half-{left}-{top}-{accent:?}"),
+                |cw, ch| crate::art::half_cap(cw, ch, accent, left, top),
+            );
+        }
+    }
+    let play = state.voice_play.as_ref().filter(|p| p.index == index);
+    let done = match play {
+        Some(p) if voice.seconds > 0.0 => (p.position() / voice.seconds).min(1.0),
+        _ => 0.0,
+    };
+    let name = if play.is_some_and(|p| !p.paused) {
+        "pause"
+    } else {
+        "play"
+    };
+    let button = Rect::new(x + 1, rect.y, 4, 3);
+    pixel_cell(
+        frame,
+        button,
+        &format!("voice-{name}-{accent:?}"),
+        |cw, ch| crate::art::icon_on(cw, ch, name, dark, accent),
+    );
+    let faded = [0, 1, 2].map(|c| (accent[c] as f32 * 0.6 + dark[c] as f32 * 0.4) as u8);
+    let wave = Rect::new(x + 5, rect.y, VOICE_WAVE.min(w.saturating_sub(12)), 3);
+    pixel_cell(
+        frame,
+        wave,
+        &format!(
+            "wave-{index}-{}-{}",
+            (done * 96.0) as u32,
+            voice.peaks.len()
+        ),
+        |cw, ch| crate::art::wave(cw, ch, &voice.peaks, done, (dark, faded, accent)),
+    );
+    let shown = if play.is_some() {
+        play.map_or(0.0, |p| p.position())
+    } else {
+        voice.seconds
+    };
+    frame.render_widget(
+        Paragraph::new(format!(" {}", clock(shown))).style(Style::default().fg(ink).bg(fill)),
+        Rect::new(wave.right(), y, 6.min(x + w - wave.right()), 1),
+    );
+    hits.push(Hit {
+        area: button,
+        action: Click::VoiceToggle(index),
+    });
+    for i in 0..wave.width {
+        hits.push(Hit {
+            area: Rect::new(wave.x + i, rect.y, 1, 3),
+            action: Click::VoiceSeek(index, i * 1000 / wave.width.max(1)),
+        });
+    }
+}
+/// Demo mode: answer with a canned line after a short think.
+fn demo_reply(state: &mut Screen, tx: mpsc::UnboundedSender<Update>) {
+    const LINES: [&str; 4] = [
+        "א גוטן טאג, וואס מאכט איר?",
+        "דאס איז א פרובע פון דעם עקראן, נישט קיין אמת'ע איבערשרייבונג.",
+        "מען קען קליקן אויף דעם ענטפער כדי עס צו קאפירן.",
+        "ווען מען רעדט אריין אין מיקראפאן, שרייבט עס זיך אויס דא אויף דער רעכטער זייט, שורה נאך שורה.",
+    ];
+    state.busy = true;
+    state.notice.clear();
+    let line = LINES[state.plain_log.len() / 2 % LINES.len()];
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(2200));
+        let _ = tx.send(Update::Done(1, Ok(json!({ "text": line }))));
+    });
+}
+/// Pasted or dropped text: a path to an audio file is attached and sent; anything else is
+/// typed into the box.
+fn attach_text(state: &mut Screen, text: &str) {
+    let first = text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or_default();
+    let mut path = first
+        .trim()
+        .trim_matches(|c| c == '\'' || c == '"')
+        .to_owned();
+    if let Some(rest) = path.strip_prefix("file://") {
+        path = percent_decode(rest);
+    }
+    if plain(state) && Path::new(&path).is_file() {
+        state.input = path;
+        state.pending_key = Some(KeyCode::Enter);
+    } else {
+        state.input.push_str(&clean(text).replace('\n', " "));
+    }
+}
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(v) = text
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(v);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+/// Ctrl+V: a copied file (from a file manager) or copied text.
+fn paste_clipboard(state: &mut Screen) {
+    let run = |args: &[&str]| {
+        std::process::Command::new("wl-paste")
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    let text = if std::env::var_os("WAYLAND_DISPLAY").is_some() && run(&["--version"]).is_some() {
+        if run(&["--list-types"]).is_some_and(|t| t.contains("text/uri-list")) {
+            run(&["-n", "-t", "text/uri-list"])
+        } else {
+            run(&["-n"])
+        }
+    } else {
+        arboard::Clipboard::new().ok().and_then(|mut c| {
+            c.get()
+                .file_list()
+                .ok()
+                .and_then(|f| f.first().map(|p| p.display().to_string()))
+                .or_else(|| c.get_text().ok())
+        })
+    };
+    match text {
+        Some(text) if !text.trim().is_empty() => attach_text(state, &text),
+        _ => state.notice = "Nothing to paste.".into(),
+    }
+}
+fn copy_text(state: &mut Screen, text: &str) {
+    if state.clipboard.is_none() {
+        state.clipboard = arboard::Clipboard::new().ok();
+    }
+    state.notice = match state
+        .clipboard
+        .as_mut()
+        .map(|c| c.set_text(text.to_owned()))
+    {
+        Some(Ok(())) => "Copied.".into(),
+        _ => "Cannot reach the clipboard.".into(),
+    };
+}
+/// Open the system file picker in the background; the choice comes back as `Update::Picked`.
+fn pick_file(tx: mpsc::UnboundedSender<Update>) {
+    std::thread::spawn(move || {
+        // Linux: the desktop's own picker (works on GNOME, KDE, Hyprland, ...).
+        #[cfg(target_os = "linux")]
+        {
+            let picked = rfd::FileDialog::new()
+                .set_title("Pick a recording")
+                .add_filter(
+                    "Audio",
+                    &["wav", "mp3", "m4a", "flac", "ogg", "opus", "aac", "mp4"],
+                )
+                .add_filter("All files", &["*"])
+                .pick_file();
+            if let Some(path) = picked {
+                let _ = tx.send(Update::Picked(Some(path.display().to_string())));
+                return;
+            }
+        }
+        let attempts: Vec<(&str, Vec<&str>)> = if cfg!(target_os = "macos") {
+            vec![(
+                "osascript",
+                vec![
+                    "-e",
+                    "POSIX path of (choose file with prompt \"Pick a recording\")",
+                ],
+            )]
+        } else if cfg!(windows) {
+            vec![(
+                "powershell",
+                vec![
+                    "-NoProfile",
+                    "-Command",
+                    "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Filter = 'Audio|*.wav;*.mp3;*.m4a;*.flac;*.ogg|All files|*.*'; if ($d.ShowDialog() -eq 'OK') { $d.FileName }",
+                ],
+            )]
+        } else {
+            vec![
+                (
+                    "zenity",
+                    vec!["--file-selection", "--title=Pick a recording"],
+                ),
+                ("kdialog", vec!["--getopenfilename", "."]),
+            ]
+        };
+        let mut picked = None;
+        for (program, args) in attempts {
+            if let Ok(out) = std::process::Command::new(program).args(&args).output() {
+                let path = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+                if out.status.success() && !path.is_empty() {
+                    picked = Some(path);
+                }
+                break;
+            }
+        }
+        let _ = tx.send(Update::Picked(picked));
+    });
+}
+
 #[cfg(test)]
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
@@ -3625,9 +5069,11 @@ mod tests {
     }
     #[test]
     fn responsive_controls_remain_visible_and_hit_targets_never_overlap() {
+        LAB.store(true, std::sync::atomic::Ordering::Relaxed); // developer layout
         for width in [32, 40, 60, 80, 120] {
             for tab in 0..TABS.len() {
                 let mut state = Screen::default();
+                state.lab = true;
                 state.tab = tab;
                 state.input = "א גוטן".into();
                 state.pair = Some(json!({"id":"fixture"}));
@@ -3916,8 +5362,37 @@ mod tests {
         }
     }
     #[test]
+    fn plain_app_has_attach_record_send_and_copy() {
+        for (width, height) in [(40, 16), (80, 24), (160, 50)] {
+            let mut term =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            let mut state = Screen::default();
+            state.tab = 1;
+            let mut hits = vec![];
+            term.draw(|f| hits = draw(f, &state, &[])).unwrap();
+            for action in [Click::Attach, Click::Record, Click::Key(KeyCode::Esc)] {
+                assert!(
+                    hits.iter().any(|h| h.action == action),
+                    "{action:?} at {width}"
+                );
+            }
+            state.input = "shiur.mp3".into();
+            state.plain_log = vec![(false, "א גוטן טאג".into())];
+            term.draw(|f| hits = draw(f, &state, &[])).unwrap();
+            assert!(hits.iter().any(|h| h.action == Click::Key(KeyCode::Enter)));
+            assert!(hits.iter().any(|h| h.action == Click::CopyAt(0)));
+            assert!(!hits.iter().any(|h| matches!(h.action, Click::Tab(_))));
+            for (i, a) in hits.iter().enumerate() {
+                for b in &hits[i + 1..] {
+                    assert!(a.area.intersection(b.area).is_empty(), "{width}: overlap");
+                }
+            }
+        }
+    }
+    #[test]
     fn read_aloud_button_and_score_card() {
         let mut state = Screen::default();
+        state.lab = true;
         state.tab = 1;
         // No file box or Transcribe button until something is typed; Record is always there.
         assert!(!controls(&state).iter().any(|c| c.0 == "Transcribe"));

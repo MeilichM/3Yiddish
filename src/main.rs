@@ -213,9 +213,15 @@ async fn main() -> Result<()> {
         cli.command,
         Command::Tui { .. } | Command::Serve | Command::Model { .. } | Command::Transcribe { .. }
     ) {
+        // An explicit --config is relative to where the user is; the default lives in the home.
+        let explicit = cli.config != std::path::Path::new("config.toml");
         let config = std::path::absolute(&cli.config)?;
-        three_yiddish::paths::enter_home()?;
-        cli.config = config;
+        let home = three_yiddish::paths::enter_home()?;
+        cli.config = if explicit {
+            config
+        } else {
+            home.join("config.toml")
+        };
     }
     let models = three_yiddish::paths::models();
     if let Command::Model { action } = &cli.command {

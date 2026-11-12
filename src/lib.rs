@@ -1,3 +1,4 @@
+pub mod art;
 pub mod asr;
 pub mod audio;
 pub mod config;

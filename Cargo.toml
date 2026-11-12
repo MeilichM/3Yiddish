@@ -1,7 +1,7 @@
 [package]
 name = "three-yiddish"
 default-run = "3yiddish"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 publish = false
 license = "CC-BY-NC-SA-4.0"
@@ -38,6 +38,8 @@ rodio = { version = "0.23", default-features = false, features = ["playback", "r
 self-replace = "1.5"
 enigo = "0.6"
 arboard = "3"
+ratatui-image = { version = "11.1.0", default-features = false }
+image = { version = "0.25", default-features = false }
 
 [dev-dependencies]
 http-body-util = "0.1"
@@ -58,6 +60,7 @@ whisper-rs = { version = "0.16", features = ["metal"] }
 # capture device is often unavailable on PipeWire desktops.
 [target.'cfg(target_os = "linux")'.dependencies]
 cpal = { version = "0.18", features = ["pulseaudio"] }
+rfd = "0.18"
 
 # Global hold-to-talk key on Windows/macOS. Linux binds keys in the desktop instead, so the
 # Linux binary does not need X11 libraries at runtime.

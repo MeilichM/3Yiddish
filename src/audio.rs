@@ -16,6 +16,7 @@ pub const MAX_SECONDS: u32 = 120;
 pub struct Recorder {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<(Vec<f32>, u32, u16)>>,
+    samples: Arc<std::sync::Mutex<Vec<f32>>>,
 }
 
 impl Recorder {
@@ -25,8 +26,9 @@ impl Recorder {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let (ready, opened) = mpsc::channel::<Result<(), String>>();
+        let samples = Arc::new(std::sync::Mutex::new(Vec::<f32>::new()));
+        let shared = samples.clone();
         let thread = std::thread::spawn(move || {
-            let samples = Arc::new(std::sync::Mutex::new(Vec::<f32>::new()));
             let opened = open_input(samples.clone());
             let (stream, rate, channels) = match opened {
                 Ok(v) => v,
@@ -48,10 +50,20 @@ impl Recorder {
             Ok(Ok(())) => Ok(Self {
                 stop,
                 thread: Some(thread),
+                samples: shared,
             }),
             Ok(Err(e)) => Err(anyhow!("{e}")),
             Err(_) => Err(anyhow!("Cannot open the microphone")),
         }
+    }
+
+    /// How loud the microphone is right now, 0 to 1 (the peak of the last moment).
+    pub fn level(&self) -> f32 {
+        self.samples.lock().map_or(0.0, |s| {
+            s[s.len().saturating_sub(2400)..]
+                .iter()
+                .fold(0.0f32, |peak, v| peak.max(v.abs()))
+        })
     }
 
     /// True once the recording hit its time limit by itself.
@@ -86,7 +98,8 @@ impl Drop for Recorder {
 /// Plays one file on the PC speakers. WAV/MP3/FLAC/OGG/M4A play natively; anything else
 /// (old WebM/Opus phone recordings) falls back to ffplay when it is installed.
 pub enum Playback {
-    Native(rodio::MixerDeviceSink, rodio::Player),
+    /// The output, the player and the length in seconds.
+    Native(rodio::MixerDeviceSink, rodio::Player, f32),
     External(std::process::Child),
 }
 
@@ -97,6 +110,7 @@ impl Playback {
             .and_then(crate::asr::decode)
         {
             Ok(pcm) => {
+                let seconds = pcm.len() as f32 / 16_000.0;
                 let sink = rodio::DeviceSinkBuilder::open_default_sink()
                     .context("No speaker available")?;
                 let player = rodio::Player::connect_new(sink.mixer());
@@ -105,7 +119,7 @@ impl Playback {
                     std::num::NonZero::new(16_000).unwrap(),
                     pcm,
                 ));
-                Ok(Self::Native(sink, player))
+                Ok(Self::Native(sink, player, seconds))
             }
             Err(_) => Ok(Self::External(
                 std::process::Command::new("ffplay")
@@ -120,17 +134,42 @@ impl Playback {
         }
     }
 
+    /// The length in seconds, when known.
+    pub fn seconds(&self) -> Option<f32> {
+        match self {
+            Self::Native(_, _, seconds) => Some(*seconds),
+            Self::External(_) => None,
+        }
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        if let Self::Native(_, player, _) = self {
+            if paused {
+                player.pause();
+            } else {
+                player.play();
+            }
+        }
+    }
+
+    /// Jump to `seconds` from the start.
+    pub fn seek(&self, seconds: f32) {
+        if let Self::Native(_, player, _) = self {
+            let _ = player.try_seek(std::time::Duration::from_secs_f32(seconds.max(0.0)));
+        }
+    }
+
     /// True when playback has ended.
     pub fn done(&mut self) -> bool {
         match self {
-            Self::Native(_, player) => player.empty(),
+            Self::Native(_, player, _) => player.empty(),
             Self::External(child) => child.try_wait().ok().flatten().is_some(),
         }
     }
 
     pub fn stop(&mut self) {
         match self {
-            Self::Native(_, player) => player.stop(),
+            Self::Native(_, player, _) => player.stop(),
             Self::External(child) => {
                 let _ = child.kill();
                 let _ = child.wait();

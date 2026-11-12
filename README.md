@@ -26,9 +26,12 @@ That's it. It downloads itself, checks it isn't broken, and grabs the speech mod
 3yiddish
 ```
 
-Press **● Record**. Say something. Press **■ Stop**. Watch the Yiddish appear.
+Click the mic. Say something. Click stop. Watch the Yiddish appear, then click it to copy.
+Your recording stays in the chat as a voice note, so you can play yourself back.
 
-Got a file instead?
+Got a recording already? Click **+**, drag the file in, or paste it with Ctrl+V.
+
+Rather stay in the terminal?
 
 ```sh
 3yiddish transcribe shiur.mp3
