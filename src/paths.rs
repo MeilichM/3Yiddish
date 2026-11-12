@@ -42,3 +42,8 @@ pub fn enter_home() -> Result<PathBuf> {
 pub fn models() -> PathBuf {
     PathBuf::from("state/models")
 }
+
+/// The user's saved GPU/CPU choice (`gpu` or `cpu`); no file means automatic.
+pub fn compute() -> PathBuf {
+    PathBuf::from("state/compute")
+}

@@ -78,6 +78,10 @@ enum Update {
     Upgrade(String, bool),
     /// An audio file chosen with the attach button (None: cancelled or no picker).
     Picked(Option<String>),
+    /// A finished take: its file and length in seconds, or why it failed.
+    Recorded(PathBuf, Result<f32, String>),
+    /// The service's answer to an engine switch: its new `compute` object.
+    Compute(Result<Value, String>),
 }
 /// A sent recording or audio file that can be played back.
 #[derive(Clone)]
@@ -106,6 +110,10 @@ impl VoicePlay {
     }
 }
 /// Columns the wave takes in a voice note, and how many loudness values are kept for it.
+/// Two Spaces closer together than this are a held key repeating, not two taps.
+const SPACE_REPEAT_MS: u128 = 150;
+/// A held Space counts as released once its repeats have stopped for this long.
+const SPACE_RELEASE_MS: u128 = 250;
 const PEAKS: usize = 24;
 const PEAK_VALUES: usize = 48;
 /// Squeeze a recording's loudness history into the bars of a voice note.
@@ -113,6 +121,8 @@ fn peaks(levels: &[f32]) -> Vec<u8> {
     if levels.is_empty() {
         return Vec::new();
     }
+    // Relative to the loudest moment, so a loud voice and a quiet one both show their shape.
+    let loudest = levels.iter().fold(0.0f32, |p, v| p.max(*v)).max(0.02);
     (0..PEAK_VALUES)
         .map(|i| {
             let (a, b) = (
@@ -123,7 +133,7 @@ fn peaks(levels: &[f32]) -> Vec<u8> {
                 [a.min(levels.len() - 1)..b.min(levels.len()).max(a.min(levels.len() - 1) + 1)]
                 .iter()
                 .fold(0.0f32, |p, v| p.max(*v));
-            ((peak.clamp(0.0, 1.0) * 4.0).sqrt().min(1.0) * 255.0) as u8
+            ((peak / loudest).clamp(0.0, 1.0).powf(0.8) * 255.0) as u8
         })
         .collect()
 }
@@ -198,6 +208,10 @@ fn voice_seek(state: &mut Screen, index: usize, permille: u16) {
     }
     voice_start(state, index, target);
 }
+#[cfg(not(target_os = "android"))]
+type Clip = arboard::Clipboard;
+#[cfg(target_os = "android")]
+type Clip = ();
 #[derive(Default)]
 struct Screen {
     /// Plain app: this session's messages, newest last; `true` marks what the user sent
@@ -210,6 +224,11 @@ struct Screen {
     /// Microphone loudness over the current recording, one value per screen refresh.
     levels: Vec<f32>,
     rec_started: Option<std::time::Instant>,
+    /// Space to talk: the last Space seen, whether a hold (a run of repeats) is under way, and
+    /// a lone Space that is either a tap to stop or the start of that run.
+    space_last: Option<std::time::Instant>,
+    space_hold: bool,
+    space_tap: Option<std::time::Instant>,
     /// Demo mode's pretend recording.
     demo_rec: Option<std::time::Instant>,
     /// The response just copied by a click, for a moment of feedback.
@@ -217,12 +236,17 @@ struct Screen {
     /// The notice on screen and when it appeared, so the plain app can clear it by itself.
     notice_since: Option<(String, std::time::Instant)>,
     /// Kept alive so copied text stays on the clipboard (Linux drops it with the owner).
-    clipboard: Option<arboard::Clipboard>,
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    clipboard: Option<Clip>,
     tab: usize,
     input: String,
     drafts: [String; 7],
     outputs: [String; 7],
     status: Option<Value>,
+    /// The engine (true: GPU) a click asked for, shown at once while the service switches.
+    compute_switch: Option<bool>,
+    /// Demo mode's pretend engine, for a service that does not report one.
+    demo_gpu: Option<bool>,
     pair: Option<Value>,
     phone_status: Option<Value>,
     phone_transcript_revision: u64,
@@ -409,45 +433,46 @@ fn reload(path: &Path) -> Result<()> {
         bail!("In-place refresh currently requires Unix");
     }
 }
-/// Stop the PC microphone, save the take as a WAV and send it to be transcribed.
-fn finish_recording(state: &mut Screen, actions: &mpsc::UnboundedSender<Action>) -> Result<()> {
+/// Stop the PC microphone. Nothing here waits: the screen shows the voice note at once, and
+/// a helper thread finishes the take (its last moments, the WAV file) and reports back with
+/// `Update::Recorded`, which sends it to be transcribed.
+fn finish_recording(state: &mut Screen, tx: &mpsc::UnboundedSender<Update>) {
     let Some(recorder) = state.recording.take() else {
-        return Ok(());
+        return;
     };
-    let path = state.recording_path.take().context("No recording file")?;
-    let mut seconds = 0.0;
-    let saved = recorder.stop().and_then(|pcm| {
-        seconds = pcm.len() as f32 / 16_000.0;
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).truncate(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        std::io::Write::write_all(&mut options.open(&path)?, &crate::asr::wav(&pcm)?)?;
-        Ok(())
-    });
-    if let Err(error) = saved {
-        state.notice = format!("Microphone recording failed: {error}");
-        state.read_pending = None;
-        return Ok(());
-    }
+    let Some(path) = state.recording_path.take() else {
+        return;
+    };
     if !state.lab {
-        // A voice note the user can listen back to.
+        // A voice note the user can listen back to; its exact length arrives with the file.
         state.voices.insert(
             state.plain_log.len(),
             Voice {
                 path: path.clone(),
-                seconds,
+                seconds: state
+                    .rec_started
+                    .map_or(0.0, |at| at.elapsed().as_secs_f32()),
                 peaks: peaks(&state.levels),
             },
         );
         state.plain_log.push((true, String::new()));
     }
-    state.input = path.to_string_lossy().into_owned();
-    state.audio_path = Some(path);
-    submit_reading(state, actions)
+    state.busy = true;
+    let tx = tx.clone();
+    std::thread::spawn(move || {
+        let saved = recorder.stop().and_then(|pcm| {
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true).truncate(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            std::io::Write::write_all(&mut options.open(&path)?, &crate::asr::wav(&pcm)?)?;
+            Ok(pcm.len() as f32 / 16_000.0)
+        });
+        let _ = tx.send(Update::Recorded(path, saved.map_err(|e| e.to_string())));
+    });
 }
 fn speak_destination(input: &str, directory: &Path) -> Result<(String, PathBuf)> {
     let (text, path) = if let Some((text, file)) = input.rsplit_once('|') {
@@ -1041,6 +1066,7 @@ enum Click {
     PgStep(bool),
     PgChoose(&'static str),
     PlayPick,
+    Compute,
     Toss,
     RedoPick,
     Attach,
@@ -1048,6 +1074,38 @@ enum Click {
     VoiceToggle(usize),
     /// Jump to this many thousandths of the way through.
     VoiceSeek(usize, u16),
+}
+/// Which engine runs the speech model, and whether there is a graphics card to switch to:
+/// (on the GPU, GPU available). None when the service does not say (an older one).
+fn compute(state: &Screen) -> Option<(bool, bool)> {
+    let told = state.status.as_ref().and_then(|status| {
+        let compute = status.get("compute")?;
+        Some((
+            compute["mode"].as_str()? == "gpu",
+            compute["gpu_available"].as_bool()?,
+        ))
+    });
+    let (gpu, available) = told.or(state.demo_gpu.map(|gpu| (gpu, true)))?;
+    Some((state.compute_switch.unwrap_or(gpu), available))
+}
+/// A click on the engine chip: the other engine shows at once, and is returned for the
+/// service to switch to. Nothing happens while a switch is under way or without a GPU. Demo
+/// mode's pretend engine just flips.
+fn switch_compute(state: &mut Screen) -> Option<bool> {
+    let (gpu, available) = compute(state)?;
+    if !available || state.compute_switch.is_some() {
+        return None;
+    }
+    let told = state
+        .status
+        .as_ref()
+        .is_some_and(|status| status.get("compute").is_some());
+    if !told {
+        state.demo_gpu = Some(!gpu);
+        return None;
+    }
+    state.compute_switch = Some(!gpu);
+    Some(!gpu)
 }
 #[derive(Clone, Copy)]
 struct Hit {
@@ -2276,6 +2334,30 @@ pub async fn run(
     let (actions, mut pending) = mpsc::unbounded_channel::<Action>();
     let (mic_actions, mut mic_pending) = mpsc::unbounded_channel::<String>();
     let (game_actions, mut game_pending) = mpsc::unbounded_channel::<(String, Value)>();
+    let (compute_actions, mut compute_pending) = mpsc::unbounded_channel::<bool>();
+    let compute_client = client.clone();
+    let compute_base = base.clone();
+    let compute_tx = tx.clone();
+    let compute_worker = tokio::spawn(async move {
+        while let Some(gpu) = compute_pending.recv().await {
+            let mode = if gpu { "gpu" } else { "cpu" };
+            let result = async {
+                json_response(
+                    compute_client
+                        .post(format!("{compute_base}/v1/compute"))
+                        .json(&json!({ "mode": mode }))
+                        .send()
+                        .await?,
+                )
+                .await
+            }
+            .await
+            .map_err(|e: anyhow::Error| e.to_string());
+            if compute_tx.send(Update::Compute(result)).is_err() {
+                break;
+            }
+        }
+    });
     let game_client = client.clone();
     let game_base = base.clone();
     let game_worker = tokio::spawn(async move {
@@ -2355,6 +2437,7 @@ pub async fn run(
             actions,
             mic_actions,
             game_actions,
+            compute_actions,
             watches,
             eval_tx,
             config,
@@ -2365,6 +2448,7 @@ pub async fn run(
     worker.abort();
     mic_worker.abort();
     game_worker.abort();
+    compute_worker.abort();
     let exit = result?;
     let refresh_error = if let Some(path) = exit.refresh {
         let error = reload(&path);
@@ -2771,11 +2855,13 @@ fn sync_pair(state: &mut Screen, actions: &mpsc::UnboundedSender<Action>) -> Res
     state.pair_sync_busy = true;
     Ok(())
 }
+#[allow(clippy::too_many_arguments)]
 fn terminal(
     mut updates: mpsc::UnboundedReceiver<Update>,
     actions: mpsc::UnboundedSender<Action>,
     mic_actions: mpsc::UnboundedSender<String>,
     game_actions: mpsc::UnboundedSender<(String, Value)>,
+    compute_actions: mpsc::UnboundedSender<bool>,
     watches: Vec<(String, PathBuf)>,
     eval_tx: mpsc::UnboundedSender<Update>,
     config: PathBuf,
@@ -2784,6 +2870,7 @@ fn terminal(
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         bail!("The TUI needs an interactive terminal; use CLI commands in scripts");
     }
+    quiet_stderr();
     let mut terminal = ratatui::init();
     let _restore = Restore;
     // Before mouse reporting starts, so nothing else arrives in the terminal's answers.
@@ -2835,10 +2922,12 @@ fn terminal(
     if hidden(state.tab) {
         state.tab = next_tab(state.tab, 1);
     }
+    let demo = std::env::var_os("THREE_YIDDISH_DEMO").is_some();
+    state.demo_gpu = demo.then_some(true);
     if !state.lab {
         state.pair = None;
         // Demo mode starts with a couple of messages so the screen can be judged at a glance.
-        if std::env::var_os("THREE_YIDDISH_DEMO").is_some() && state.plain_log.is_empty() {
+        if demo && state.plain_log.is_empty() {
             state.plain_log = vec![
                 (true, String::new()),
                 (false, "א גוטן טאג, וואס מאכט איר?".into()),
@@ -2903,6 +2992,21 @@ fn terminal(
                     };
                 }
                 Update::Status(v) => state.status = Some(v),
+                Update::Compute(result) => {
+                    state.compute_switch = None;
+                    match result {
+                        // Kept until the next status refresh brings the same news.
+                        Ok(v) => {
+                            if v.get("mode").is_some()
+                                && let Some(status) =
+                                    state.status.as_mut().and_then(Value::as_object_mut)
+                            {
+                                status.insert("compute".into(), v);
+                            }
+                        }
+                        Err(e) => state.notice = format!("Engine: {e}"),
+                    }
+                }
                 Update::Available(app, model) => {
                     state.app_update = app;
                     state.model_update = model;
@@ -2965,6 +3069,24 @@ fn terminal(
                         }
                         state.phone_command_seen = Some(taps);
                         state.phone_status = Some(v);
+                    }
+                }
+                Update::Recorded(path, result) => {
+                    state.busy = false;
+                    match result {
+                        Ok(seconds) => {
+                            if let Some(voice) = state.voices.values_mut().find(|v| v.path == path)
+                            {
+                                voice.seconds = seconds;
+                            }
+                            state.input = path.to_string_lossy().into_owned();
+                            state.audio_path = Some(path);
+                            submit_reading(&mut state, &actions)?;
+                        }
+                        Err(error) => {
+                            state.notice = format!("Microphone recording failed: {error}");
+                            state.read_pending = None;
+                        }
                     }
                 }
                 Update::Picked(path) => {
@@ -3050,9 +3172,16 @@ fn terminal(
                 }
             }
         }
+        // The microphone could not be opened (found out in the background).
+        if let Some(error) = state.recording.as_mut().and_then(|r| r.failed()) {
+            state.recording = None;
+            state.recording_path = None;
+            state.read_pending = None;
+            state.notice = error;
+        }
         // The recording hit its time limit by itself.
         if state.recording.as_ref().is_some_and(|r| r.finished()) {
-            finish_recording(&mut state, &actions)?;
+            finish_recording(&mut state, &eval_tx);
         }
         if state.playback.as_mut().is_some_and(|p| p.done()) {
             state.playback = None;
@@ -3080,6 +3209,22 @@ fn terminal(
                 game_actions.send((id.to_owned(), game.clone()))?;
                 state.published_game = game;
             }
+        }
+        // Space to talk: the hold ended (its repeats stopped), or a lone tap asked to stop.
+        if recording(&state) && state.pending_key.is_none() {
+            let since = |at: Option<std::time::Instant>| at.map(|t| t.elapsed().as_millis());
+            let released =
+                state.space_hold && since(state.space_last).is_some_and(|ms| ms > SPACE_RELEASE_MS);
+            let tapped =
+                !state.space_hold && since(state.space_tap).is_some_and(|ms| ms >= SPACE_REPEAT_MS);
+            if released || tapped {
+                state.space_hold = false;
+                state.space_tap = None;
+                state.pending_key = Some(KeyCode::F(10));
+            }
+        } else if !recording(&state) {
+            state.space_hold = false;
+            state.space_tap = None;
         }
         // Follow the microphone while recording (demo mode makes up a voice).
         let live = state.recording.as_ref().map(|r| r.level()).or_else(|| {
@@ -3197,6 +3342,12 @@ fn terminal(
                             }
                             Click::AudioOutput => {
                                 state.phone_audio = !state.phone_audio;
+                                continue;
+                            }
+                            Click::Compute => {
+                                if let Some(gpu) = switch_compute(&mut state) {
+                                    compute_actions.send(gpu)?;
+                                }
                                 continue;
                             }
                             Click::Tab(tab) => {
@@ -3423,6 +3574,38 @@ fn terminal(
         if key.kind != KeyEventKind::Press {
             continue;
         }
+        // Space, with nothing typed: hold to talk, let go to send; a single tap starts and
+        // another tap stops. Terminals do not say when a key is released, but a held key
+        // repeats, so a run of Spaces is a hold and its end is the release.
+        if plain(&state)
+            && key.code == KeyCode::Char(' ')
+            && key.modifiers.is_empty()
+            && state.input.is_empty()
+        {
+            let now = std::time::Instant::now();
+            if !recording(&state) {
+                if !state.busy {
+                    state.space_last = Some(now);
+                    state.space_hold = false;
+                    state.space_tap = None;
+                    state.pending_key = Some(KeyCode::F(10));
+                }
+            } else if state.space_hold {
+                state.space_last = Some(now);
+            } else if state
+                .space_tap
+                .is_some_and(|at| now.duration_since(at).as_millis() < SPACE_REPEAT_MS)
+            {
+                // A second Space right behind the first: the key is being held.
+                state.space_hold = true;
+                state.space_tap = None;
+                state.space_last = Some(now);
+            } else {
+                state.space_tap = Some(now);
+                state.space_last = Some(now);
+            }
+            continue;
+        }
         if plain(&state) {
             // THREE_YIDDISH_DEMO: canned replies, for trying the screen without a microphone.
             let demo = std::env::var_os("THREE_YIDDISH_DEMO").is_some();
@@ -3592,21 +3775,17 @@ fn terminal(
             }
             KeyCode::F(10) if state.recording.is_some() || (state.tab == 1 && !state.busy) => {
                 if state.recording.is_some() {
-                    finish_recording(&mut state, &actions)?;
+                    finish_recording(&mut state, &eval_tx);
                 } else {
                     let folder = Path::new("state/recordings");
                     std::fs::create_dir_all(folder)?;
                     let path = folder
                         .canonicalize()?
                         .join(format!("{}.wav", uuid::Uuid::new_v4()));
-                    match crate::audio::Recorder::start() {
-                        Ok(recorder) => {
-                            state.recording = Some(recorder);
-                            state.recording_path = Some(path);
-                            state.read_pending = state.read_line.clone();
-                        }
-                        Err(error) => state.notice = format!("{error}"),
-                    }
+                    // Never waits for the device: the screen flips to recording at once.
+                    state.recording = Some(crate::audio::Recorder::start_now());
+                    state.recording_path = Some(path);
+                    state.read_pending = state.read_line.clone();
                 }
             }
             KeyCode::PageUp => scroll_view(&mut state, true, 8),
@@ -3712,6 +3891,25 @@ fn terminal(
         refresh: None,
     })
 }
+/// While the screen is ours, anything a library prints to stderr would be drawn over it.
+/// Send it to state/app.log instead (Unix; on Windows the known sources are silenced).
+fn quiet_stderr() {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        if let Ok(log) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("state/app.log")
+        {
+            // SAFETY: dup2 onto stderr's descriptor; `log` stays open for the process's life.
+            unsafe {
+                libc::dup2(log.as_raw_fd(), libc::STDERR_FILENO);
+            }
+            std::mem::forget(log);
+        }
+    }
+}
 /// The regular app: one centered column. Logo on top, transcripts as message cards, and a
 /// typing box at the bottom with square buttons on both sides (attach left, record/send right).
 fn plain(state: &Screen) -> bool {
@@ -3749,9 +3947,15 @@ fn draw_rain(frame: &mut Frame, area: Rect) {
         (1u64, 5u64, 0.8f32, 2.0f32, 6u64, 0.30f32),
         (2, 12, 4.0, 5.0, 4, 0.38),
     ] {
-        for column in 0..area.width {
-            let seed = noise(column as u64, layer * 101);
-            if !seed.is_multiple_of(every) {
+        // Every other column, and each column in at most one layer, so drops never touch.
+        for column in (0..area.width).step_by(2) {
+            let seed = noise(column as u64, 101);
+            let mine = if layer == 1 {
+                seed.is_multiple_of(every)
+            } else {
+                !seed.is_multiple_of(5) && (seed / 7).is_multiple_of(every)
+            };
+            if !mine {
                 continue;
             }
             let speed = slow + ((seed >> 8) % 100) as f32 / 100.0 * range;
@@ -3788,50 +3992,63 @@ fn draw_rain(frame: &mut Frame, area: Rect) {
 struct Graphics {
     picker: ratatui_image::picker::Picker,
     cache: std::collections::HashMap<(String, u16, u16), ratatui_image::protocol::Protocol>,
-    accent: [u8; 3],
-    record: [u8; 3],
     dark: [u8; 3],
+    exact: bool,
 }
 thread_local! {
     static GRAPHICS: std::cell::RefCell<Option<Graphics>> = const { std::cell::RefCell::new(None) };
 }
-/// Ask the terminal whether it can draw images (Kitty, iTerm2 or Sixel), and for the theme's
-/// accent and red so the art matches the desktop. Without images the app draws characters.
+thread_local! {
+    /// The theme's accent, red and surface color; known even where images are not.
+    static THEME: std::cell::Cell<([u8; 3], [u8; 3], [u8; 3])> =
+        const { std::cell::Cell::new(([107, 224, 211], [255, 119, 143], [29, 39, 52])) };
+}
+/// Ask the terminal for the theme's accent, red and background (so everything matches the
+/// desktop), and whether it can draw images (Kitty, iTerm2 or Sixel). Without images the app
+/// draws the same shapes from characters.
 fn init_graphics() {
     use ratatui_image::picker::{Picker, ProtocolType};
+    let (accent, record, dark) =
+        theme_colors().unwrap_or(([107, 224, 211], [255, 119, 143], [29, 39, 52]));
+    THEME.with(|t| t.set((accent, record, dark)));
     let Ok(picker) = Picker::from_query_stdio() else {
         return;
     };
     if picker.protocol_type() == ProtocolType::Halfblocks {
         return;
     }
-    let (accent, record, dark) =
-        theme_colors().unwrap_or(([107, 224, 211], [255, 119, 143], [29, 39, 52]));
+    // Sixel rounds every picture to bands of six pixels, so one-row pictures (bubble corners)
+    // do not line up; those terminals get character corners instead.
+    // Kitty pictures are placed with ordinary characters. Sixel and iTerm2 pictures are raw
+    // escape codes that leave the text cursor somewhere else (see `settle_cursor`).
+    let exact = picker.protocol_type() == ProtocolType::Kitty;
     GRAPHICS.with(|g| {
         *g.borrow_mut() = Some(Graphics {
             picker,
             cache: std::collections::HashMap::new(),
-            accent,
-            record,
             dark,
+            exact,
         })
     });
 }
 fn theme_rgb() -> ([u8; 3], [u8; 3]) {
-    GRAPHICS.with(|g| {
-        g.borrow()
-            .as_ref()
-            .map_or(([107, 224, 211], [255, 119, 143]), |g| (g.accent, g.record))
-    })
+    let (accent, record, _) = THEME.with(|t| t.get());
+    (accent, record)
 }
-/// The terminal theme's blue, red and dark tone (ANSI 4, 1 and 0), asked over the terminal itself. The
+/// The surface color for bubbles, buttons and the typing bar.
+fn surface() -> Color {
+    let (_, _, s) = THEME.with(|t| t.get());
+    Color::Rgb(s[0], s[1], s[2])
+}
+/// The terminal theme's blue and red (ANSI 4 and 1), and a surface color one step off its
+/// background, asked over the terminal itself. The
 /// device-attributes request at the end is always answered, so the read cannot hang on a
 /// terminal that ignores the color question.
 #[cfg(unix)]
 fn theme_colors() -> Option<([u8; 3], [u8; 3], [u8; 3])> {
     use std::io::{Read, Write};
     let mut out = std::io::stdout();
-    out.write_all(b"\x1b]4;4;?\x07\x1b]4;1;?\x07\x1b]4;0;?\x07\x1b[c")
+    out.write_all(b"\x1b]4;4;?\x07\x1b]4;1;?\x07\x1b]11;?\x07\x1b[c")
         .ok()?;
     out.flush().ok()?;
     let mut reply = Vec::new();
@@ -3855,7 +4072,22 @@ fn theme_colors() -> Option<([u8; 3], [u8; 3], [u8; 3])> {
         let mut channel = || u8::from_str_radix(parts.next()?.get(..2)?, 16).ok();
         Some([channel()?, channel()?, channel()?])
     };
-    Some((color(4)?, color(1)?, color(0)?))
+    // The window's own background (OSC 11), nudged a step toward the middle so bubbles and
+    // buttons stand out from it on dark and light themes alike. The theme's "black" (ANSI 0)
+    // is often the background itself, so it cannot be used.
+    let start = text.find("]11;rgb:")? + "]11;rgb:".len();
+    let mut parts = text[start..].split(|c: char| !c.is_ascii_hexdigit());
+    let mut channel = || u8::from_str_radix(parts.next()?.get(..2)?, 16).ok();
+    let background = [channel()?, channel()?, channel()?];
+    let light = background.iter().map(|&c| c as u32).sum::<u32>() > 3 * 128;
+    let surface = background.map(|c| {
+        if light {
+            (c as f32 * 0.9) as u8
+        } else {
+            (c as f32 + (255.0 - c as f32) * 0.09) as u8
+        }
+    });
+    Some((color(4)?, color(1)?, surface))
 }
 #[cfg(not(unix))]
 fn theme_colors() -> Option<([u8; 3], [u8; 3], [u8; 3])> {
@@ -3922,17 +4154,110 @@ fn pixel_art(
             g.cache.insert(id.clone(), protocol);
         }
         frame.render_widget(ratatui_image::Image::new(&g.cache[&id]), area);
+        if !g.exact {
+            settle_cursor(frame, area);
+        }
         true
     })
 }
 /// How wide a round button is, in columns: as wide as two rows are tall.
 fn button_columns() -> u16 {
     GRAPHICS.with(|g| {
-        g.borrow().as_ref().map_or(3, |g| {
+        g.borrow().as_ref().map_or(5, |g| {
             let font = g.picker.font_size();
             (font.height * 2).div_ceil(font.width.max(1))
         })
     })
+}
+/// After a Sixel/iTerm2 picture the terminal's cursor is wherever the picture left it, but the
+/// screen writer assumes it moved one cell right, so the next neighbouring cell would be
+/// printed in the wrong place. Put the cursor where it is expected.
+fn settle_cursor(frame: &mut Frame, area: Rect) {
+    let cell = &mut frame.buffer_mut()[(area.x, area.y)];
+    let symbol = format!("{}\x1b[{};{}H", cell.symbol(), area.y + 1, area.x + 2);
+    cell.set_symbol(&symbol);
+}
+/// One corner cell of a bubble or bar: drawn as a smooth picture where the terminal places
+/// small pictures exactly, otherwise as a quarter/half block character in the same color.
+fn corner(frame: &mut Frame, cell: Rect, rgb: [u8; 3], left: bool, kind: Corner) {
+    if picture_fits(1) {
+        let key = format!("corner-{left}-{kind:?}-{rgb:?}");
+        let drawn = pixel_cell(frame, cell, &key, |cw, ch| match kind {
+            Corner::Top => crate::art::half_cap(cw, ch, rgb, left, true),
+            Corner::Bottom => crate::art::half_cap(cw, ch, rgb, left, false),
+            Corner::Side { top, bottom } => crate::art::cap(cw, ch, rgb, left, top, bottom),
+        });
+        if drawn {
+            return;
+        }
+    }
+    let glyph = match (kind, left) {
+        (Corner::Top, true) => "▗",
+        (Corner::Top, false) => "▖",
+        (Corner::Bottom, true) => "▝",
+        (Corner::Bottom, false) => "▘",
+        (Corner::Side { .. }, true) => "▐",
+        (Corner::Side { .. }, false) => "▌",
+    };
+    frame.render_widget(
+        Paragraph::new(glyph).style(Style::default().fg(Color::Rgb(rgb[0], rgb[1], rgb[2]))),
+        cell,
+    );
+}
+/// Can a picture `rows` tall be placed exactly? Kitty and iTerm2: always. Sixel draws in
+/// bands of six pixels, so only heights that are a multiple of six line up.
+fn picture_fits(rows: u16) -> bool {
+    GRAPHICS.with(|g| {
+        g.borrow().as_ref().is_some_and(|g| {
+            // One-row pictures on Sixel spill a couple of pixels into the next row (it draws
+            // in bands of six); taller ones are fine.
+            g.exact
+                || rows >= 3
+                || (rows as u32 * g.picker.font_size().height as u32).is_multiple_of(6)
+        })
+    })
+}
+/// Both ends of a fat bar (three rows: half a row of padding, the text row, half a row):
+/// truly round where a three-row picture fits, block-character corners otherwise.
+fn bar_ends(frame: &mut Frame, x: u16, right: u16, text_row: u16, rgb: [u8; 3]) {
+    for left in [true, false] {
+        let column = if left { x } else { right };
+        // Three-row pictures place fine everywhere (the round buttons are the same size).
+        if pixel_cell(
+            frame,
+            Rect::new(column, text_row - 1, 1, 3),
+            &format!("bar-end-{left}-{rgb:?}"),
+            |cw, ch| crate::art::bar_end(cw, ch, rgb, left),
+        ) {
+            continue;
+        }
+        corner(
+            frame,
+            Rect::new(column, text_row - 1, 1, 1),
+            rgb,
+            left,
+            Corner::Top,
+        );
+        corner(
+            frame,
+            Rect::new(column, text_row + 1, 1, 1),
+            rgb,
+            left,
+            Corner::Bottom,
+        );
+    }
+}
+#[derive(Clone, Copy, Debug)]
+enum Corner {
+    /// The half row above a bar (filled in its lower half).
+    Top,
+    /// The half row below a bar.
+    Bottom,
+    /// The end of a text row; `top`/`bottom` round that end of the bubble.
+    Side { top: bool, bottom: bool },
+}
+fn surface_rgb() -> [u8; 3] {
+    THEME.with(|t| t.get()).2
 }
 /// A block of screen cells drawn as one image of exactly its size. False without image support.
 fn pixel_cell(
@@ -3945,28 +4270,73 @@ fn pixel_cell(
         let mut g = g.borrow_mut();
         let Some(g) = g.as_mut() else { return false };
         let id = (key.to_owned(), cell.width, cell.height);
+        let font = g.picker.font_size();
+        // Sixel draws in bands of six pixels: a picture whose height is not a multiple of six
+        // runs a few (clear) pixels into the row below, so it is given that row as well.
+        let spill = !g.exact && !(font.height as u32 * cell.height as u32).is_multiple_of(6);
+        let area = Rect::new(cell.x, cell.y, cell.width, cell.height + u16::from(spill));
+        if area.bottom() > frame.area().bottom() {
+            return false;
+        }
         if !g.cache.contains_key(&id) {
-            let font = g.picker.font_size();
             let image = make(
                 font.width as u32 * cell.width as u32,
                 font.height as u32 * cell.height as u32,
             );
             let Ok(protocol) = g.picker.new_protocol(
                 image::DynamicImage::ImageRgba8(image),
-                cell.as_size(),
+                area.as_size(),
                 ratatui_image::Resize::Fit(None),
             ) else {
                 return false;
             };
             g.cache.insert(id.clone(), protocol);
         }
-        frame.render_widget(ratatui_image::Image::new(&g.cache[&id]), cell);
+        frame.render_widget(ratatui_image::Image::new(&g.cache[&id]), area);
+        if spill {
+            // The extra row still belongs to whatever is drawn there.
+            for x in cell.x..cell.right() {
+                frame.buffer_mut()[(x, cell.bottom())]
+                    .set_diff_option(ratatui::buffer::CellDiffOption::None);
+            }
+        }
+        if !g.exact {
+            settle_cursor(frame, cell);
+        }
         true
     })
 }
 /// The theme's dark tone, when the terminal draws images (so bubbles get truly round ends).
 fn round_theme() -> Option<[u8; 3]> {
     GRAPHICS.with(|g| g.borrow().as_ref().map(|g| g.dark))
+}
+/// Text-only terminal with a Nerd Font: shapes are one line tall with true half-circle ends
+/// (the font's round caps are exactly one line high), instead of fat stepped ones.
+fn slim_round() -> bool {
+    round_theme().is_none() && nerd_font()
+}
+/// A one-line pill: half-circle, filled middle, half-circle.
+fn pill_caps(frame: &mut Frame, x: u16, right: u16, row: u16, fill: Color) {
+    let cap = Style::default().fg(fill).bg(Color::Reset);
+    frame.render_widget(
+        Paragraph::new("\u{e0b6}").style(cap),
+        Rect::new(x, row, 1, 1),
+    );
+    frame.render_widget(
+        Paragraph::new("\u{e0b4}").style(cap),
+        Rect::new(right, row, 1, 1),
+    );
+}
+/// Is the system's monospace font a Nerd Font (so its icon glyphs can be used)? Asked once
+/// from fontconfig; anywhere that cannot be told, plain Unicode symbols are used.
+fn nerd_font() -> bool {
+    static NERD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *NERD.get_or_init(|| {
+        std::process::Command::new("fc-match")
+            .arg("monospace")
+            .output()
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("Nerd"))
+    })
 }
 /// A square button with a drawn icon.
 #[allow(clippy::too_many_arguments)]
@@ -4025,24 +4395,127 @@ fn square(
         }
         return;
     }
-    frame.render_widget(
-        Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(color)),
-        area,
-    );
-    let top = area.y + area.height.saturating_sub(icon.len() as u16) / 2;
-    for (i, line) in icon.iter().enumerate() {
-        frame.render_widget(
-            Paragraph::new(*line)
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
-            Rect::new(area.x + 1, top + i as u16, area.width.saturating_sub(2), 1),
-        );
-    }
+    // The largest clean single characters: the box-drawing cross and diagonals span the
+    // whole cell.
+    let symbol = if nerd_font() {
+        // Real icons from the Nerd Font the terminal is using.
+        match art {
+            "plus" => "\u{f067}",
+            "close" => "\u{f00d}",
+            "refresh" => "\u{f021}",
+            "mic" => "\u{f130}",
+            "stop" => "\u{f04d}",
+            "send" => "\u{f1d8}",
+            _ => icon[0],
+        }
+    } else {
+        match art {
+            "plus" => "╋",
+            "close" => "╳",
+            "refresh" => "↻",
+            "mic" => "⬤",
+            "stop" => "■",
+            "send" => "➤",
+            _ => icon[0],
+        }
+    };
+    text_plate(frame, area, symbol, color);
     if enabled {
         hits.push(Hit { area, action });
     }
+}
+/// A filled shape out of characters, three rows tall with `text` on its middle row: a
+/// one-line pill with a Nerd Font, otherwise half blocks above and below (half a row of
+/// padding either side), the same shape as the typing bar.
+fn text_plate(frame: &mut Frame, area: Rect, text: &str, color: Color) {
+    let fill = surface();
+    let inner = area.width.saturating_sub(2) as usize;
+    let slim = slim_round();
+    if !slim {
+        frame.render_widget(
+            Paragraph::new(format!("▗{}▖", "▄".repeat(inner))).style(Style::default().fg(fill)),
+            Rect::new(area.x, area.y, area.width, 1),
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(text).alignment(Alignment::Center).style(
+            Style::default()
+                .fg(color)
+                .bg(fill)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(area.x, area.y + 1, area.width, 1),
+    );
+    if slim {
+        pill_caps(frame, area.x, area.right() - 1, area.y + 1, fill);
+    } else {
+        frame.render_widget(
+            Paragraph::new(format!("▝{}▘", "▀".repeat(inner))).style(Style::default().fg(fill)),
+            Rect::new(area.x, area.y + 2, area.width, 1),
+        );
+    }
+}
+/// A gray that reads on the surface color: `strength` of the way from it to white (to black
+/// on a light theme).
+fn neutral(strength: f32) -> [u8; 3] {
+    let surface = surface_rgb();
+    let light = surface.iter().map(|&c| c as u32).sum::<u32>() > 3 * 128;
+    let end = if light { 0.0 } else { 255.0 };
+    surface.map(|c| (c as f32 + (end - c as f32) * strength) as u8)
+}
+/// The engine chip's width in columns, and how far its plate sits in from the sides of its
+/// picture: as far as a round button's does, so the gaps between all three are the same.
+fn chip_columns() -> (u16, u32) {
+    let side = button_columns() as u32;
+    GRAPHICS
+        .with(|g| {
+            g.borrow().as_ref().map(|g| {
+                let font = g.picker.font_size();
+                let (cell, height) = (font.width.max(1) as u32, font.height as u32 * 3);
+                let inset = (side * cell).saturating_sub(height * 2 / 3) / 2;
+                let columns = (crate::art::chip_width(height) + 2 * inset).div_ceil(cell);
+                (columns as u16, inset)
+            })
+        })
+        .unwrap_or((if slim_round() { 7 } else { 5 }, 0))
+}
+/// The engine chip: "GPU" in the accent color or "CPU" in gray (dimmer when there is no GPU
+/// to switch to), as tall as the round buttons. A click switches engines.
+fn engine_chip(
+    frame: &mut Frame,
+    hits: &mut Vec<Hit>,
+    area: Rect,
+    (gpu, available): (bool, bool),
+    enabled: bool,
+) {
+    let word = if gpu { "GPU" } else { "CPU" };
+    if enabled {
+        hits.push(Hit {
+            area,
+            action: Click::Compute,
+        });
+    }
+    if let Some(dark) = round_theme() {
+        let rgb = if gpu {
+            theme_rgb().0
+        } else {
+            neutral(if available { 0.6 } else { 0.3 })
+        };
+        let inset = chip_columns().1;
+        if pixel_cell(frame, area, &format!("chip-{word}-{rgb:?}"), |w, h| {
+            crate::art::chip(w, h, inset, word, rgb, dark)
+        }) {
+            return;
+        }
+    }
+    let color = if gpu {
+        THEME_ACCENT
+    } else if available {
+        Color::Reset
+    } else {
+        Color::DarkGray
+    };
+    text_plate(frame, area, word, color);
 }
 fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
     let mut hits = Vec::new();
@@ -4060,7 +4533,9 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
         screen.x + margin,
         screen.y + 1,
         screen.width - margin * 2,
-        screen.height - 2,
+        // One spare row at the bottom: Sixel terminals round images up to whole pixel bands,
+        // and a picture spilling past the last row scrolls the screen.
+        screen.height - 3,
     );
     // The top bar is three rows (its content sits on the middle one), like the typing bar.
     let head = area.y + 1;
@@ -4073,9 +4548,11 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
         frame,
         Rect::new(
             screen.x,
-            area.y + 4,
+            area.y + 5,
             screen.width,
-            bar_y.saturating_sub(area.y + 6),
+            // A clear row above the bar's line: some terminals let a letter's glyph spill
+            // into the row below it and nick the line.
+            bar_y.saturating_sub(area.y + 8),
         ),
     );
     // One slim row: logo on the left; updates, refresh and quit on the right.
@@ -4167,6 +4644,29 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
             enabled,
         );
         x -= 1;
+    }
+    // The engine chip is the first to go when the bar is crowded: the update chips, the
+    // status (room is kept for it, so the chip does not come and go with every recording)
+    // and an alert all come before it.
+    if let Some(engine) = compute(state) {
+        let w = chip_columns().0;
+        let others = tools
+            .iter()
+            .map(|(label, ..)| label.chars().count() as u16 + 3)
+            .sum::<u16>()
+            + 16
+            + if state.notice.is_empty() { 0 } else { 9 };
+        if x >= logo_end + w + 1 + others {
+            x -= w;
+            engine_chip(
+                frame,
+                &mut hits,
+                Rect::new(x, area.y, w, 3),
+                engine,
+                engine.1 && state.compute_switch.is_none() && !state.busy && !active,
+            );
+            x -= 1;
+        }
     }
     for (label, action, enabled) in tools.iter().rev() {
         let text = format!(" {label} ");
@@ -4308,39 +4808,35 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
         ))
     } else {
         Line::from(Span::styled(
-            " Speak, or drop / Ctrl+V a recording",
+            " Hold Space to talk, or drop / Ctrl+V a recording",
             Style::default().fg(Color::DarkGray),
         ))
     };
     // The typing bar is a fat rounded bubble: the text row plus half a row above and below,
     // with corners drawn as real pixels when the terminal can.
-    let dark = round_theme();
-    let fill = dark.map_or(Color::Black, |d| Color::Rgb(d[0], d[1], d[2]));
+    let fill = surface();
     frame.render_widget(
         Paragraph::new(line).style(Style::default().bg(fill)),
         box_area,
     );
-    if box_area.width > 4 {
+    if slim_round() && box_area.width > 4 {
+        pill_caps(frame, box_area.x, box_area.right() - 1, bar_y, fill);
+    } else if box_area.width > 4 {
         let edge = (box_area.width - 2) as usize;
         for (row, half, top) in [(bar_y - 1, "▄", true), (bar_y + 1, "▀", false)] {
             frame.render_widget(
                 Paragraph::new(half.repeat(edge)).style(Style::default().fg(fill)),
                 Rect::new(box_area.x + 1, row, box_area.width - 2, 1),
             );
-            if let Some(dark) = dark {
-                for left in [true, false] {
-                    let x = if left {
-                        box_area.x
-                    } else {
-                        box_area.right() - 1
-                    };
-                    let key = format!("half-{left}-{top}-{dark:?}");
-                    pixel_cell(frame, Rect::new(x, row, 1, 1), &key, |cw, ch| {
-                        crate::art::half_cap(cw, ch, dark, left, top)
-                    });
-                }
-            }
+            let _ = top;
         }
+        bar_ends(
+            frame,
+            box_area.x,
+            box_area.right() - 1,
+            bar_y,
+            surface_rgb(),
+        );
     }
     frame.render_widget(
         Paragraph::new("▁".repeat(area.width as usize)).style(Style::default().fg(Color::DarkGray)),
@@ -4386,22 +4882,38 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
                     .block(Block::default().padding(ratatui::widgets::Padding::horizontal(1))),
                 Rect::new(x + 1, y, w - 2, h),
             );
-            for row in 0..h {
-                let (top, bottom) = (row == 0, row + 1 == h);
-                for left in [true, false] {
-                    let cell = Rect::new(if left { x } else { x + w - 1 }, y + row, 1, 1);
-                    if !top && !bottom {
-                        frame
-                            .render_widget(Block::default().style(Style::default().bg(fill)), cell);
-                        continue;
+            // Each end is one picture the height of the bubble, round at top and bottom.
+            for left in [true, false] {
+                let column = if left { x } else { x + w - 1 };
+                let drawn = pixel_cell(
+                    frame,
+                    Rect::new(column, y, 1, h),
+                    &format!("bubble-end-{left}-{rgb:?}"),
+                    |cw, ch| crate::art::cap(cw, ch, rgb, left, true, true),
+                );
+                if !drawn {
+                    for row in 0..h {
+                        let kind = Corner::Side {
+                            top: row == 0,
+                            bottom: row + 1 == h,
+                        };
+                        corner(frame, Rect::new(column, y + row, 1, 1), rgb, left, kind);
                     }
-                    let key = format!("cap-{left}-{top}-{bottom}-{rgb:?}");
-                    pixel_cell(frame, cell, &key, |cw, ch| {
-                        crate::art::cap(cw, ch, rgb, left, top, bottom)
-                    });
                 }
             }
             return Rect::new(x, y, w, h);
+        }
+        if h == 1 && nerd_font() {
+            // One line: a true pill.
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .alignment(Alignment::Right)
+                    .style(Style::default().fg(fg).bg(bg))
+                    .block(Block::default().padding(ratatui::widgets::Padding::horizontal(1))),
+                Rect::new(x + 1, y, w - 2, 1),
+            );
+            pill_caps(frame, x, x + w - 1, y, bg);
+            return Rect::new(x, y - 1, w, 3);
         }
         let cap = Style::default().fg(bg);
         for row in y..y + h {
@@ -4460,7 +4972,7 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
             y,
             vec![Line::from(bars)],
             14,
-            (Color::Reset, Color::Black),
+            (Color::Reset, surface()),
             false,
         );
         y = y.saturating_sub(gap);
@@ -4490,7 +5002,6 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
         }
         // Without image support: play/pause, the wave in characters, and the time.
         if let Some(voice) = voice {
-            const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
             let play = state.voice_play.as_ref().filter(|p| p.index == index);
             let position = play.map_or(0.0, |p| p.position());
             let done = if voice.seconds > 0.0 {
@@ -4513,7 +5024,8 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
             })];
             for i in 0..PEAKS {
                 let glyph = match voice.peaks.get(i * voice.peaks.len() / PEAKS) {
-                    Some(level) => LEVELS[(*level / 32) as usize],
+                    // A thin dotted bar per column (braille), centered, with a gap beside it.
+                    Some(level) => ['⠂', '⠆', '⠇', '⡇'][(*level / 64) as usize],
                     None if i < done => '━',
                     None => '─',
                 };
@@ -4546,9 +5058,9 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
         let colors = if *mine {
             (Color::Black, THEME_ACCENT)
         } else if copied {
-            (THEME_ACCENT, Color::Black)
+            (THEME_ACCENT, surface())
         } else {
-            (Color::Reset, Color::Black)
+            (Color::Reset, surface())
         };
         let rect = bubble(frame, y, lines, inner, colors, *mine);
         if voice.is_some() {
@@ -4603,16 +5115,9 @@ fn draw_voice(
                 .style(Style::default().fg(fill)),
             Rect::new(x + 1, row, w.saturating_sub(2), 1),
         );
-        for left in [true, false] {
-            let cx = if left { x } else { x + w - 1 };
-            pixel_cell(
-                frame,
-                Rect::new(cx, row, 1, 1),
-                &format!("half-{left}-{top}-{accent:?}"),
-                |cw, ch| crate::art::half_cap(cw, ch, accent, left, top),
-            );
-        }
+        let _ = top;
     }
+    bar_ends(frame, x, x + w - 1, y, accent);
     let play = state.voice_play.as_ref().filter(|p| p.index == index);
     let done = match play {
         Some(p) if voice.seconds > 0.0 => (p.position() / voice.seconds).min(1.0),
@@ -4735,19 +5240,33 @@ fn paste_clipboard(state: &mut Screen) {
             run(&["-n"])
         }
     } else {
-        arboard::Clipboard::new().ok().and_then(|mut c| {
-            c.get()
-                .file_list()
-                .ok()
-                .and_then(|f| f.first().map(|p| p.display().to_string()))
-                .or_else(|| c.get_text().ok())
-        })
+        clipboard_get()
     };
     match text {
         Some(text) if !text.trim().is_empty() => attach_text(state, &text),
         _ => state.notice = "Nothing to paste.".into(),
     }
 }
+#[cfg(not(target_os = "android"))]
+fn clipboard_get() -> Option<String> {
+    arboard::Clipboard::new().ok().and_then(|mut c| {
+        c.get()
+            .file_list()
+            .ok()
+            .and_then(|f| f.first().map(|p| p.display().to_string()))
+            .or_else(|| c.get_text().ok())
+    })
+}
+/// Android: the phone's clipboard through Termux:API.
+#[cfg(target_os = "android")]
+fn clipboard_get() -> Option<String> {
+    std::process::Command::new("termux-clipboard-get")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+#[cfg(not(target_os = "android"))]
 fn copy_text(state: &mut Screen, text: &str) {
     if state.clipboard.is_none() {
         state.clipboard = arboard::Clipboard::new().ok();
@@ -4759,6 +5278,23 @@ fn copy_text(state: &mut Screen, text: &str) {
     {
         Some(Ok(())) => "Copied.".into(),
         _ => "Cannot reach the clipboard.".into(),
+    };
+}
+#[cfg(target_os = "android")]
+fn copy_text(state: &mut Screen, text: &str) {
+    use std::io::Write;
+    let copied = std::process::Command::new("termux-clipboard-set")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.take().map(|mut i| i.write_all(text.as_bytes()));
+            child.wait()
+        })
+        .is_ok_and(|s| s.success());
+    state.notice = if copied {
+        "Copied.".into()
+    } else {
+        "To copy, install the Termux:API app and run: pkg install termux-api".into()
     };
 }
 /// Open the system file picker in the background; the choice comes back as `Update::Picked`.
@@ -5388,6 +5924,77 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn engine_chip_shows_the_engine_and_switches_once() {
+        let show = |state: &Screen, width: u16| {
+            let mut term =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
+            let mut hits = vec![];
+            term.draw(|f| hits = draw(f, state, &[])).unwrap();
+            for (i, a) in hits.iter().enumerate() {
+                for b in &hits[i + 1..] {
+                    assert!(a.area.intersection(b.area).is_empty(), "{width}: overlap");
+                }
+            }
+            let clickable = hits.iter().any(|h| h.action == Click::Compute);
+            (rendered_text(&term), clickable)
+        };
+        let engine = |mode: &str, available: bool| {
+            Some(json!({"compute": {"mode": mode, "gpu_available": available}}))
+        };
+        let mut state = Screen::default();
+        state.tab = 1;
+        // A service that says nothing about engines: no chip.
+        state.status = Some(json!({"name": "3Yiddish"}));
+        let (text, clickable) = show(&state, 80);
+        assert!(!clickable && !text.contains("GPU") && !text.contains("CPU"));
+        for width in [62, 80, 160] {
+            state.status = engine("gpu", true);
+            let (text, clickable) = show(&state, width);
+            assert!(clickable && text.contains("GPU"), "{width}");
+            state.status = engine("cpu", true);
+            let (text, clickable) = show(&state, width);
+            assert!(clickable && text.contains("CPU"), "{width}");
+            // No graphics card: the chip is there, and is not a button.
+            state.status = engine("cpu", false);
+            let (text, clickable) = show(&state, width);
+            assert!(!clickable && text.contains("CPU"), "{width}");
+        }
+        // Crowded: everything else keeps its place, with or without the chip.
+        state.status = engine("gpu", true);
+        assert!(!show(&state, 40).0.contains("GPU"));
+        state.app_update = Some("9.9.9".into());
+        state.model_update = Some("first".into());
+        state.notice = "Could not hear anything.".into();
+        state.busy = true;
+        for width in [62, 70, 80, 100] {
+            let (text, clickable) = show(&state, width);
+            assert!(!clickable, "{width}: no switching while transcribing");
+            for kept in ["Update app", "Get model", "◌ Transcribing"] {
+                assert!(text.contains(kept), "{width}: {kept}");
+            }
+        }
+        assert!(show(&state, 100).0.contains("Could not hear anything."));
+        state.busy = false;
+        // A click shows the other engine at once and asks the service once.
+        assert_eq!(switch_compute(&mut state), Some(false));
+        assert_eq!(compute(&state), Some((false, true)));
+        assert_eq!(switch_compute(&mut state), None);
+        let (text, clickable) = show(&state, 100);
+        assert!(!clickable && text.contains("CPU"));
+        // Without a graphics card a click does nothing.
+        state.compute_switch = None;
+        state.status = engine("cpu", false);
+        assert_eq!(switch_compute(&mut state), None);
+        assert_eq!(compute(&state), Some((false, false)));
+        // Demo mode pretends by itself when the service says nothing.
+        state.status = None;
+        assert_eq!(compute(&state), None);
+        state.demo_gpu = Some(true);
+        assert!(show(&state, 100).1);
+        assert_eq!(switch_compute(&mut state), None);
+        assert_eq!(compute(&state), Some((false, true)));
     }
     #[test]
     fn read_aloud_button_and_score_card() {

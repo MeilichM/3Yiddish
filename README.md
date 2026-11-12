@@ -20,6 +20,10 @@ irm https://github.com/TripleU613/3Yiddish/releases/latest/download/install.ps1 
 That's it. It downloads itself, checks it isn't broken, and grabs the speech model
 (~600 MB, one time; go make a coffee).
 
+Got a graphics card? The installer notices and gives you the GPU build, which is about ten
+times faster. A little GPU/CPU button on top shows which one is running; click it to switch.
+On an Android phone it works inside Termux too.
+
 ## Use it
 
 ```sh

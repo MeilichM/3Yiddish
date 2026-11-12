@@ -19,6 +19,18 @@ fn glyph(letter: char) -> [&'static str; 7] {
         'S' => [
             ".####", "#....", "#....", ".###.", "....#", "....#", "####.",
         ],
+        'G' => [
+            ".###.", "#...#", "#....", "#.###", "#...#", "#...#", ".###.",
+        ],
+        'C' => [
+            ".###.", "#...#", "#....", "#....", "#....", "#...#", ".###.",
+        ],
+        'P' => [
+            "####.", "#...#", "#...#", "####.", "#....", "#....", "#....",
+        ],
+        'U' => [
+            "#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###.",
+        ],
         _ => [
             "#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#",
         ],
@@ -280,12 +292,14 @@ pub fn half_cap(width: u32, height: u32, color: Rgb, left: bool, top: bool) -> R
     image
 }
 
-/// A round button: a filled rounded square two thirds of the canvas tall, centered, with the
-/// icon scaled by a whole number in its middle.
-pub fn button(width: u32, height: u32, name: &str, color: Rgb, fill: Rgb) -> RgbaImage {
-    let tile = (height * 2 / 3).min(width) as f32;
-    let (left, top) = ((width as f32 - tile) / 2.0, (height as f32 - tile) / 2.0);
-    let radius = tile * 0.32;
+/// A filled rectangle with smoothly rounded corners (each pixel sampled 4x4) on a clear canvas.
+fn plate(
+    (width, height): (u32, u32),
+    (left, top): (f32, f32),
+    (wide, tall): (f32, f32),
+    radius: f32,
+    fill: Rgb,
+) -> RgbaImage {
     let mut image = RgbaImage::new(width, height);
     for y in 0..height {
         for x in 0..width {
@@ -295,7 +309,7 @@ pub fn button(width: u32, height: u32, name: &str, color: Rgb, fill: Rgb) -> Rgb
                     let px = x as f32 + (sx as f32 + 0.5) / 4.0 - left;
                     let py = y as f32 + (sy as f32 + 0.5) / 4.0 - top;
                     // Fold onto one corner.
-                    let (fx, fy) = (px.min(tile - px), py.min(tile - py));
+                    let (fx, fy) = (px.min(wide - px), py.min(tall - py));
                     let filled = fx >= 0.0
                         && fy >= 0.0
                         && !(fx < radius
@@ -311,6 +325,21 @@ pub fn button(width: u32, height: u32, name: &str, color: Rgb, fill: Rgb) -> Rgb
             );
         }
     }
+    image
+}
+
+/// A round button: a filled rounded square two thirds of the canvas tall, centered, with the
+/// icon scaled by a whole number in its middle.
+pub fn button(width: u32, height: u32, name: &str, color: Rgb, fill: Rgb) -> RgbaImage {
+    let tile = (height * 2 / 3).min(width) as f32;
+    let (left, top) = ((width as f32 - tile) / 2.0, (height as f32 - tile) / 2.0);
+    let mut image = plate(
+        (width, height),
+        (left, top),
+        (tile, tile),
+        tile * 0.32,
+        fill,
+    );
     let icon = icon(name, color);
     let scale = ((tile * 0.62) as u32 / icon.width()).max(1);
     let scaled = image::imageops::resize(
@@ -325,6 +354,51 @@ pub fn button(width: u32, height: u32, name: &str, color: Rgb, fill: Rgb) -> Rgb
         ((width - scaled.width().min(width)) / 2) as i64,
         ((height - scaled.height().min(height)) / 2) as i64,
     );
+    image
+}
+
+/// The engine chip's letters on a bar `height` pixels tall: their whole-number scale (about
+/// half the plate's height) and the width of the three-letter word.
+fn chip_word(height: u32) -> (u32, u32) {
+    let scale = (height / 3 / 7).max(1);
+    (scale, 17 * scale)
+}
+
+/// How wide the engine chip's plate is at the least: the word and a quarter of the plate's
+/// height either side of it.
+pub fn chip_width(height: u32) -> u32 {
+    chip_word(height).1 + height / 3
+}
+
+/// The engine chip, "GPU" or "CPU" in the logo's letters: a plate as tall and as round as
+/// the buttons beside it, `inset` pixels in from both sides of the canvas.
+pub fn chip(width: u32, height: u32, inset: u32, word: &str, color: Rgb, fill: Rgb) -> RgbaImage {
+    let tile = (height * 2 / 3) as f32;
+    let mut image = plate(
+        (width, height),
+        (inset as f32, (height as f32 - tile) / 2.0),
+        (width.saturating_sub(2 * inset) as f32, tile),
+        tile * 0.32,
+        fill,
+    );
+    let (scale, wide) = chip_word(height);
+    let mut x = width.saturating_sub(wide) / 2;
+    let y = height.saturating_sub(7 * scale) / 2;
+    for letter in word.chars() {
+        for (r, row) in glyph(letter).iter().enumerate() {
+            for (c, _) in row.chars().enumerate().filter(|(_, v)| *v == '#') {
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        let (px, py) = (x + c as u32 * scale + dx, y + r as u32 * scale + dy);
+                        if px < width && py < height {
+                            image.put_pixel(px, py, shade(color, 1.0));
+                        }
+                    }
+                }
+            }
+        }
+        x += 6 * scale;
+    }
     image
 }
 
@@ -418,6 +492,39 @@ pub fn wave(
     image
 }
 
+/// One end of a fat bar, one cell wide and three rows tall: filled in the middle two thirds
+/// with both outer corners rounded, clear above and below.
+pub fn bar_end(width: u32, height: u32, color: Rgb, left: bool) -> RgbaImage {
+    let (top, bottom) = (height as f32 / 6.0, height as f32 * 5.0 / 6.0);
+    let radius = (width as f32).min((bottom - top) / 2.0);
+    let mut image = RgbaImage::new(width, height);
+    for y in 0..height {
+        for x in 0..width {
+            let mut inside = 0;
+            for sy in 0..4 {
+                for sx in 0..4 {
+                    let px = x as f32 + (sx as f32 + 0.5) / 4.0;
+                    let px = if left { px } else { width as f32 - px };
+                    let py = y as f32 + (sy as f32 + 0.5) / 4.0;
+                    // Distance from the nearer horizontal edge of the bar.
+                    let depth = (py - top).min(bottom - py);
+                    let filled = depth >= 0.0
+                        && !(px < radius
+                            && depth < radius
+                            && (px - radius).hypot(depth - radius) > radius);
+                    inside += u32::from(filled);
+                }
+            }
+            image.put_pixel(
+                x,
+                y,
+                Rgba([color[0], color[1], color[2], (inside * 255 / 16) as u8]),
+            );
+        }
+    }
+    image
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -429,5 +536,27 @@ mod tests {
             assert_eq!(super::icon(name, [255; 3]).dimensions(), (12, 12));
             assert_eq!(super::tile(name, [255; 3], 20).dimensions(), (20, 20));
         }
+    }
+    #[test]
+    fn chip_word_is_centered_inside_its_plate() {
+        // Cells of 10x22: a bar 66 tall, a plate 44 tall, letters three pixels to the dot.
+        let width = super::chip_width(66) + 6;
+        assert_eq!(width, 79);
+        let (ink, fill) = ([1, 2, 3], [9, 9, 9]);
+        let chip = super::chip(80, 66, 3, "GPU", ink, fill);
+        let inked: Vec<(u32, u32)> = chip
+            .enumerate_pixels()
+            .filter(|(_, _, p)| p.0 == [1, 2, 3, 255])
+            .map(|(x, y, _)| (x, y))
+            .collect();
+        let xs = inked.iter().map(|p| p.0);
+        let ys = inked.iter().map(|p| p.1);
+        assert_eq!((xs.clone().min(), xs.max()), (Some(14), Some(64)));
+        assert_eq!((ys.clone().min(), ys.max()), (Some(22), Some(42)));
+        // The plate: clear above and beside, filled between.
+        assert_eq!(chip.get_pixel(40, 5)[3], 0);
+        assert_eq!(chip.get_pixel(1, 33)[3], 0);
+        assert_eq!(chip.get_pixel(4, 33).0, [9, 9, 9, 255]);
+        assert_ne!(super::chip(80, 66, 3, "CPU", ink, fill), chip);
     }
 }

@@ -4104,7 +4104,7 @@ dependencies = [
 
 [[package]]
 name = "three-yiddish"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "arboard",
@@ -4118,6 +4118,7 @@ dependencies = [
  "hound",
  "http-body-util",
  "image",
+ "libc",
  "qrcode",
  "ratatui",
  "ratatui-image",

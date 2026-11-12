@@ -2,41 +2,236 @@
 //! Replaces the Python speech worker; settings match the app's benchmarked ones
 //! (language yi, beam 5, VAD on, no conditioning on previous text).
 use anyhow::{Context, Result, bail};
-use std::{io::Cursor, path::Path, sync::Mutex};
+use std::{
+    io::Cursor,
+    path::{Path, PathBuf},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 const RATE: u32 = 16_000;
 
+/// Where the speech model runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Compute {
+    Gpu,
+    Cpu,
+}
+
+impl Compute {
+    /// The word used in `state/compute`, `$THREE_YIDDISH_COMPUTE` and the service's JSON.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Gpu => "gpu",
+            Self::Cpu => "cpu",
+        }
+    }
+
+    pub fn parse(word: &str) -> Option<Self> {
+        match word.trim() {
+            "gpu" => Some(Self::Gpu),
+            "cpu" => Some(Self::Cpu),
+            _ => None,
+        }
+    }
+
+    /// Plain words for people (`3yiddish model status`).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Gpu if cfg!(target_os = "macos") => "GPU (Metal)",
+            Self::Gpu => "GPU (Vulkan)",
+            Self::Cpu => "CPU",
+        }
+    }
+}
+
+/// Whether this binary can use a GPU at all: Vulkan builds, and every macOS build (Metal).
+pub fn gpu_built() -> bool {
+    cfg!(feature = "vulkan") || cfg!(target_os = "macos")
+}
+
+// The device list of ggml, the library under whisper.cpp (linked in with it).
+unsafe extern "C" {
+    fn ggml_backend_dev_count() -> usize;
+    fn ggml_backend_dev_get(index: usize) -> *mut std::ffi::c_void;
+    fn ggml_backend_dev_type(device: *mut std::ffi::c_void) -> std::ffi::c_int;
+}
+
+/// How many GPUs (separate or built into the processor) ggml can run on.
+fn gpu_devices() -> usize {
+    whisper_rs::install_logging_hooks(); // keep the driver's start-up lines off the screen
+    // SAFETY: plain queries of ggml's own device list; every index is below its count.
+    unsafe {
+        (0..ggml_backend_dev_count())
+            .filter(|&i| matches!(ggml_backend_dev_type(ggml_backend_dev_get(i)), 1 | 2))
+            .count()
+    }
+}
+
+/// Whether the GPU can really be used: this binary has GPU support and the computer has a
+/// GPU it can reach. whisper.cpp quietly runs on the CPU when asked for a GPU that is not
+/// there, so the app looks first (once per run).
+pub fn gpu_usable() -> bool {
+    static FOUND: OnceLock<bool> = OnceLock::new();
+    *FOUND.get_or_init(|| gpu_built() && gpu_devices() > 0)
+}
+
+/// The choice order: the environment (one run), then the saved choice, then automatic (GPU
+/// when there is one). Unknown words are skipped, and GPU is never picked without one.
+fn resolve(env: Option<&str>, file: Option<&str>, gpu: bool) -> Compute {
+    match env
+        .and_then(Compute::parse)
+        .or_else(|| file.and_then(Compute::parse))
+    {
+        Some(Compute::Cpu) => Compute::Cpu,
+        _ if gpu => Compute::Gpu,
+        _ => Compute::Cpu,
+    }
+}
+
+/// What to run on: `$THREE_YIDDISH_COMPUTE`, else the choice saved in `state/compute`, else
+/// the GPU when it can be used. Call it from the app's home folder.
+pub fn preferred() -> Compute {
+    preferred_at(&crate::paths::compute())
+}
+
+/// `preferred` for a choice file somewhere else (commands that do not enter the home folder).
+pub fn preferred_at(file: &Path) -> Compute {
+    resolve(
+        std::env::var("THREE_YIDDISH_COMPUTE").ok().as_deref(),
+        std::fs::read_to_string(file).ok().as_deref(),
+        gpu_usable(),
+    )
+}
+
+/// Save the user's choice for later runs.
+pub fn remember(compute: Compute) -> Result<()> {
+    remember_at(&crate::paths::compute(), compute)
+}
+
+/// `remember` for a choice file somewhere else. The file is swapped in whole, so a reader
+/// never sees half a word.
+pub fn remember_at(file: &Path, compute: Compute) -> Result<()> {
+    use std::io::Write;
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = file.with_extension("tmp");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut out = options.open(&tmp)?;
+    out.write_all(compute.name().as_bytes())?;
+    out.sync_all()?;
+    std::fs::rename(tmp, file)?;
+    Ok(())
+}
+
 pub struct Engine {
-    ctx: WhisperContext,
+    model: PathBuf,
     vad: Option<String>,
-    // whisper.cpp states are heavy; one transcription at a time per engine.
-    busy: Mutex<()>,
+    // whisper.cpp states are heavy; one transcription at a time per engine. The lock also
+    // lets a GPU context that fails on first use be swapped for a CPU one.
+    loaded: Mutex<Loaded>,
+    /// Running on the GPU right now; readable without waiting for a transcription.
+    gpu: AtomicBool,
+}
+
+struct Loaded {
+    ctx: WhisperContext,
+    /// On the GPU and no transcription has succeeded yet: a failure now means the GPU or its
+    /// driver does not work, so the CPU takes over.
+    unproven_gpu: bool,
+}
+
+fn context(model: &Path, gpu: bool) -> Result<WhisperContext> {
+    let params = WhisperContextParameters {
+        use_gpu: gpu,
+        // Faster encoder, same benchmark score on CPU and GPU. THREE_YIDDISH_FLASH=0 turns it
+        // off (for checks).
+        flash_attn: std::env::var("THREE_YIDDISH_FLASH").map_or(true, |v| v != "0"),
+        ..Default::default()
+    };
+    WhisperContext::new_with_params(model, params)
+        .with_context(|| format!("Cannot load the Transcribe model {}", model.display()))
+}
+
+/// The one line a GPU failure leaves on stderr before the CPU takes over.
+fn report_gpu_failure(error: &anyhow::Error) {
+    eprintln!("3Yiddish: the GPU could not be used ({error:#}); using the CPU instead.");
 }
 
 impl Engine {
-    pub fn load(model: &Path, vad: Option<&Path>) -> Result<Self> {
+    /// Load the model for `compute`. A GPU that cannot be used falls back to the CPU (here or
+    /// on the first transcription) so the request still succeeds; `compute()` tells which one
+    /// the engine ended up on.
+    pub fn load(model: &Path, vad: Option<&Path>, compute: Compute) -> Result<Self> {
         whisper_rs::install_logging_hooks(); // route whisper.cpp's console spam to (silent) log
-        let params = WhisperContextParameters {
-            flash_attn: true, // faster encoder on CPU, same output
-            ..Default::default()
+        let gpu = compute == Compute::Gpu && gpu_usable();
+        let (ctx, gpu) = match context(model, gpu) {
+            Err(e) if gpu => {
+                // A model that cannot load at all fails here too, before anything is logged.
+                let ctx = context(model, false)?;
+                report_gpu_failure(&e);
+                (ctx, false)
+            }
+            loaded => (loaded?, gpu),
         };
-        let ctx = WhisperContext::new_with_params(model, params)
-            .with_context(|| format!("Cannot load the Transcribe model {}", model.display()))?;
         Ok(Self {
-            ctx,
+            model: model.to_owned(),
             vad: vad.map(|p| p.to_string_lossy().into_owned()),
-            busy: Mutex::new(()),
+            loaded: Mutex::new(Loaded {
+                ctx,
+                unproven_gpu: gpu,
+            }),
+            gpu: AtomicBool::new(gpu),
         })
+    }
+
+    /// What the engine runs on now (CPU after a GPU fallback).
+    pub fn compute(&self) -> Compute {
+        if self.gpu.load(Ordering::Relaxed) {
+            Compute::Gpu
+        } else {
+            Compute::Cpu
+        }
     }
 
     /// 16 kHz mono samples in, Yiddish text out.
     pub fn transcribe(&self, pcm: &[f32]) -> Result<String> {
-        let _one = self
-            .busy
+        let mut loaded = self
+            .loaded
             .lock()
             .map_err(|_| anyhow::anyhow!("Transcribe engine poisoned"))?;
-        let mut state = self.ctx.create_state()?;
+        let result = self.run(&loaded.ctx, pcm);
+        match result {
+            Err(e) if loaded.unproven_gpu => {
+                // Blame the GPU only when the CPU manages the same audio; otherwise the
+                // audio or the model is the problem and the GPU engine stays.
+                let cpu = context(&self.model, false)?;
+                let text = self.run(&cpu, pcm)?;
+                report_gpu_failure(&e);
+                loaded.ctx = cpu;
+                loaded.unproven_gpu = false;
+                self.gpu.store(false, Ordering::Relaxed);
+                Ok(text)
+            }
+            result => {
+                loaded.unproven_gpu = false;
+                result
+            }
+        }
+    }
+
+    fn run(&self, ctx: &WhisperContext, pcm: &[f32]) -> Result<String> {
+        let mut state = ctx.create_state()?;
         let beam = std::env::var("THREE_YIDDISH_BEAM")
             .ok()
             .and_then(|b| b.parse().ok())
@@ -215,6 +410,47 @@ pub fn wav(pcm: &[f32]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn compute_choice_is_env_then_file_then_automatic() {
+        use Compute::{Cpu, Gpu};
+        // Automatic: the GPU when there is one.
+        assert_eq!(resolve(None, None, true), Gpu);
+        assert_eq!(resolve(None, None, false), Cpu);
+        // The saved choice, with the newline an editor leaves.
+        assert_eq!(resolve(None, Some("cpu\n"), true), Cpu);
+        assert_eq!(resolve(None, Some("gpu"), true), Gpu);
+        // The environment wins over the file.
+        assert_eq!(resolve(Some("cpu"), Some("gpu"), true), Cpu);
+        assert_eq!(resolve(Some("gpu"), Some("cpu"), true), Gpu);
+        // GPU is never picked by a binary without one.
+        assert_eq!(resolve(Some("gpu"), Some("gpu"), false), Cpu);
+        // Unknown words fall through to the next source.
+        assert_eq!(resolve(Some("fast"), Some("cpu"), true), Cpu);
+        assert_eq!(resolve(None, Some("GPU please"), true), Gpu);
+        assert_eq!(resolve(Some(""), Some(""), false), Cpu);
+    }
+
+    #[test]
+    fn gpu_is_usable_only_when_built_in_and_present() {
+        // Asks ggml for its devices (no model is loaded); the answer depends on the computer.
+        let found = gpu_devices();
+        assert_eq!(gpu_usable(), gpu_built() && found > 0);
+    }
+
+    #[test]
+    fn compute_choice_is_saved_whole_and_read_back() {
+        let dir = std::env::temp_dir().join(format!("3y-compute-{}", uuid::Uuid::new_v4()));
+        let file = dir.join("state").join("compute");
+        for choice in [Compute::Cpu, Compute::Gpu, Compute::Cpu] {
+            remember_at(&file, choice).unwrap();
+            let saved = std::fs::read_to_string(&file).unwrap();
+            assert_eq!(saved, choice.name());
+            assert_eq!(resolve(None, Some(&saved), true), choice);
+        }
+        assert!(!file.with_extension("tmp").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn decodes_wav_and_resamples_to_16k() {
         let tone: Vec<f32> = (0..48_000).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();

@@ -50,7 +50,7 @@ pub fn run(key: &str, server: &str) -> Result<()> {
             let _ = handle(stream, &control);
         }
     });
-    #[cfg(target_os = "linux")]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         eprintln!(
             "3Yiddish dictation is ready. On Linux, give it a key in your desktop's keyboard shortcuts:\n  \
@@ -62,11 +62,11 @@ pub fn run(key: &str, server: &str) -> Result<()> {
             std::thread::park();
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     listen(key, state)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn listen(key: &str, state: Shared) -> Result<()> {
     let want = parse_key(key)?;
     eprintln!("3Yiddish dictation is ready: hold {key}, speak, let go.");
@@ -218,7 +218,11 @@ fn transcribe(state: &Shared, pcm: &[f32]) -> Result<String> {
     if s.engine.is_none() {
         let (_, model, vad) = crate::model::current(&crate::paths::models())
             .context("No model installed; run `3yiddish model pull`")?;
-        s.engine = Some(crate::asr::Engine::load(&model, vad.as_deref())?);
+        s.engine = Some(crate::asr::Engine::load(
+            &model,
+            vad.as_deref(),
+            crate::asr::preferred(),
+        )?);
     }
     s.engine.as_ref().unwrap().transcribe(pcm)
 }
@@ -238,6 +242,17 @@ fn type_text(text: &str) -> Result<()> {
         }
         return Ok(());
     }
+    #[cfg(target_os = "android")]
+    {
+        let _ = text;
+        bail!("Typing into other apps is not available on Android");
+    }
+    #[cfg(not(target_os = "android"))]
+    type_on_desktop(text)
+}
+
+#[cfg(not(target_os = "android"))]
+fn type_on_desktop(text: &str) -> Result<()> {
     use enigo::{Direction, Enigo, Key, Keyboard, Settings};
     let mut clipboard = arboard::Clipboard::new()?;
     let previous = clipboard.get_text().ok();
@@ -264,7 +279,7 @@ fn type_text(text: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 /// Key names people type: F1..F12, CapsLock, ScrollLock, Pause, RightAlt, RightCtrl, Insert.
 fn parse_key(name: &str) -> Result<rdev::Key> {
     use rdev::Key::*;
@@ -293,7 +308,7 @@ fn parse_key(name: &str) -> Result<rdev::Key> {
     })
 }
 
-#[cfg(all(test, not(target_os = "linux")))]
+#[cfg(all(test, any(target_os = "windows", target_os = "macos")))]
 mod tests {
     #[test]
     fn keys_parse() {

@@ -1,3 +1,4 @@
+use crate::asr::Compute;
 use crate::{
     config::{Config, Endpoint},
     knowledge::{self, Entry},
@@ -13,7 +14,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::Semaphore;
@@ -35,6 +39,18 @@ pub struct App {
     /// In-process Transcribe engine for the installed model (version, engine); reloaded when
     /// the model store's current version changes.
     asr: Arc<std::sync::Mutex<Option<LoadedEngine>>>,
+    /// The user's GPU/CPU choice (true = GPU), read once at startup and changed by
+    /// `POST /v1/compute`.
+    gpu_chosen: Arc<AtomicBool>,
+    /// This binary has GPU support and the GPU has not failed during this run.
+    gpu_ok: Arc<AtomicBool>,
+    /// Where the choice is saved.
+    compute_file: std::path::PathBuf,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ComputeRequest {
+    mode: String,
 }
 #[derive(Debug)]
 pub struct Error(StatusCode, String);
@@ -157,6 +173,9 @@ impl App {
             permits: Arc::new(Semaphore::new(4)),
             sampling: Default::default(),
             asr: Default::default(),
+            gpu_chosen: Arc::new(AtomicBool::new(crate::asr::preferred() == Compute::Gpu)),
+            gpu_ok: Arc::new(AtomicBool::new(crate::asr::gpu_usable())),
+            compute_file: crate::paths::compute(),
         })
     }
     async fn complete(
@@ -521,7 +540,49 @@ impl App {
             .into_response())
     }
 
-    /// The engine for the installed model, loading or reloading it when the version changed.
+    /// What transcription runs on: the user's choice, or the CPU when the GPU is not usable.
+    fn compute(&self) -> Compute {
+        if self.gpu_chosen.load(Ordering::Relaxed) && self.gpu_ok.load(Ordering::Relaxed) {
+            Compute::Gpu
+        } else {
+            Compute::Cpu
+        }
+    }
+
+    fn compute_status(&self) -> Value {
+        json!({"mode": self.compute().name(), "gpu_available": self.gpu_ok.load(Ordering::Relaxed)})
+    }
+
+    /// Switch between GPU and CPU and remember it. The loaded engine is only dropped here; the
+    /// next transcription loads the new one, and one already running finishes on its own.
+    fn set_compute(&self, mode: &str) -> Result<Value> {
+        let compute =
+            Compute::parse(mode).ok_or_else(|| Error::bad("mode must be \"gpu\" or \"cpu\""))?;
+        if compute == Compute::Gpu && !self.gpu_ok.load(Ordering::Relaxed) {
+            return Err(Error(
+                StatusCode::CONFLICT,
+                "No usable GPU on this computer; Transcribe stays on the CPU".into(),
+            ));
+        }
+        crate::asr::remember_at(&self.compute_file, compute).map_err(|e| {
+            Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Cannot save the GPU/CPU choice: {e}"),
+            )
+        })?;
+        self.gpu_chosen
+            .store(compute == Compute::Gpu, Ordering::Relaxed);
+        // Never wait for a model that is loading: `local_engine` also reloads on a mismatch.
+        if let Ok(mut slot) = self.asr.try_lock()
+            && slot.as_ref().is_some_and(|(_, e)| e.compute() != compute)
+        {
+            *slot = None;
+        }
+        Ok(self.compute_status())
+    }
+
+    /// The engine for the installed model, loading or reloading it when the version or the
+    /// GPU/CPU choice changed.
     fn local_engine(
         &self,
     ) -> std::result::Result<Option<(String, Arc<crate::asr::Engine>)>, String> {
@@ -532,9 +593,17 @@ impl App {
             .asr
             .lock()
             .map_err(|_| "Transcribe engine poisoned".to_owned())?;
-        if slot.as_ref().is_none_or(|(v, _)| *v != version) {
-            let engine =
-                crate::asr::Engine::load(&model, vad.as_deref()).map_err(|e| e.to_string())?;
+        let compute = self.compute();
+        if slot
+            .as_ref()
+            .is_none_or(|(v, e)| *v != version || e.compute() != compute)
+        {
+            let engine = crate::asr::Engine::load(&model, vad.as_deref(), compute)
+                .map_err(|e| e.to_string())?;
+            if engine.compute() != compute {
+                // The engine fell back to the CPU: stop offering the GPU for this run.
+                self.gpu_ok.store(false, Ordering::Relaxed);
+            }
             *slot = Some((version, Arc::new(engine)));
         }
         Ok(slot.clone())
@@ -550,9 +619,16 @@ impl App {
                 .local_engine()
                 .map_err(|e| Error(StatusCode::SERVICE_UNAVAILABLE, e))?;
             if let Some((version, engine)) = engine {
+                let gpu_ok = self.gpu_ok.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     let pcm = crate::asr::decode(bytes)?;
-                    engine.transcribe(&pcm)
+                    let before = engine.compute();
+                    let text = engine.transcribe(&pcm);
+                    if engine.compute() != before {
+                        // First use failed on the GPU and the engine moved to the CPU.
+                        gpu_ok.store(false, Ordering::Relaxed);
+                    }
+                    text
                 })
                 .await
                 .map_err(|_| Error::upstream("Transcribe engine crashed"))?
@@ -749,8 +825,10 @@ pub fn router(app: App) -> Router {
                 "transcribe":{"status":match &app.config.transcribe{Some(e) if e.placeholder()=>"placeholder",Some(_)=>"configured-not-probed",None=>"not-configured"}},
                 "speak":{"status":match &app.config.speak{Some(e) if e.placeholder()=>"placeholder",Some(_)=>"configured-not-probed",None=>"not-configured"}}
             },
+            "compute":app.compute_status(),
             "knowledge_entries":app.entries.len(),"model_fetching":"explicit-hf-helper","inference":"local-only"
         }))}))
+        .route("/v1/compute",post(|State(app):State<App>,Json(input):Json<ComputeRequest>|async move {app.set_compute(&input.mode).map(Json)}))
         .route("/v1/chat/completions",post(|State(app):State<App>,Json(input):Json<ChatRequest>|async move {app.chat(input).await.map(Json)}))
         .route("/v1/audio/speech",post(|State(app):State<App>,Json(input):Json<SpeechRequest>|async move {app.speak(input).await}))
         .route("/v1/translate",post(|State(app):State<App>,Json(input):Json<TranslationRequest>|async move {app.translate(&input.text,&input.direction).await.map(Json)}))
@@ -817,6 +895,122 @@ mod authorization_tests {
         let original = malformed.clone();
         normalize_speech_volume(&mut malformed);
         assert_eq!(malformed, original);
+    }
+
+    /// A fresh-install app whose GPU/CPU choice lives in a temporary file, with the GPU
+    /// present or not as the test says (whatever this binary was built with).
+    fn compute_app(gpu: bool) -> (App, std::path::PathBuf) {
+        let cfg =
+            Config::load_or_default(std::path::Path::new("/nonexistent/config.toml")).unwrap();
+        let mut app = App::new(cfg).unwrap();
+        let dir = std::env::temp_dir().join(format!("3y-service-{}", uuid::Uuid::new_v4()));
+        app.compute_file = dir.join("state").join("compute");
+        app.gpu_ok = Arc::new(AtomicBool::new(gpu));
+        app.gpu_chosen = Arc::new(AtomicBool::new(gpu));
+        (app, dir)
+    }
+
+    async fn call(router: &Router, request: Request) -> (StatusCode, Value) {
+        let response = router.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+    }
+
+    fn set_compute(body: &str) -> Request {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/compute")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_owned()))
+            .unwrap()
+    }
+
+    fn status() -> Request {
+        Request::builder()
+            .uri("/v1/status")
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn compute_switches_and_is_remembered() {
+        let (app, dir) = compute_app(true);
+        let file = app.compute_file.clone();
+        let router = router(app);
+        let (code, body) = call(&router, status()).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(
+            body["compute"],
+            json!({"mode": "gpu", "gpu_available": true})
+        );
+        assert!(!file.exists(), "automatic until the user chooses");
+
+        let (code, body) = call(&router, set_compute(r#"{"mode":"cpu"}"#)).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, json!({"mode": "cpu", "gpu_available": true}));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "cpu");
+        let (_, body) = call(&router, status()).await;
+        assert_eq!(body["compute"]["mode"], "cpu");
+
+        let (code, body) = call(&router, set_compute(r#"{"mode":"gpu"}"#)).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, json!({"mode": "gpu", "gpu_available": true}));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "gpu");
+
+        let (code, body) = call(&router, set_compute(r#"{"mode":"fast"}"#)).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["type"], "three_yiddish_error");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "gpu");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn compute_refuses_gpu_when_there_is_none() {
+        let (app, dir) = compute_app(false);
+        let file = app.compute_file.clone();
+        let router = router(app);
+        let (_, body) = call(&router, status()).await;
+        assert_eq!(
+            body["compute"],
+            json!({"mode": "cpu", "gpu_available": false})
+        );
+        let (code, body) = call(&router, set_compute(r#"{"mode":"gpu"}"#)).await;
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["type"], "three_yiddish_error");
+        assert!(body["error"]["message"].as_str().unwrap().contains("GPU"));
+        assert!(!file.exists(), "a refused choice is not saved");
+        let (code, body) = call(&router, set_compute(r#"{"mode":"cpu"}"#)).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body, json!({"mode": "cpu", "gpu_available": false}));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "cpu");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn compute_falls_back_for_the_run_without_saving() {
+        // What `local_engine` and `transcribe` do when the engine reports a GPU failure.
+        let (app, dir) = compute_app(true);
+        let file = app.compute_file.clone();
+        app.gpu_ok.store(false, Ordering::Relaxed);
+        let router = router(app);
+        let (_, body) = call(&router, status()).await;
+        assert_eq!(
+            body["compute"],
+            json!({"mode": "cpu", "gpu_available": false})
+        );
+        assert!(!file.exists(), "the driver may be fixed by the next run");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn compute_route_requires_the_service_token() {
+        let (mut app, _dir) = compute_app(true);
+        app.token = Some("fixture-service-token-at-least-24-characters".into());
+        let file = app.compute_file.clone();
+        let (code, _) = call(&router(app), set_compute(r#"{"mode":"cpu"}"#)).await;
+        assert_eq!(code, StatusCode::UNAUTHORIZED);
+        assert!(!file.exists());
     }
 
     #[tokio::test]

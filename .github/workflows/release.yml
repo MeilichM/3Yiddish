@@ -1,11 +1,19 @@
 # Tag vX.Y.Z → one raw binary per platform + SHA256SUMS + installers on a GitHub release.
 # `3yiddish update` and the installers read exactly these asset names.
+# Windows and Linux x86_64 also get a graphics-card build (`-vulkan`) beside the regular one.
+# A manual run (workflow_dispatch) on a branch builds everything and tries the installers, but
+# publishes nothing: the binaries are kept as run artifacts only.
 name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 permissions:
   contents: write
+env:
+  # Pinned Vulkan SDK (headers, loader import library, glslc) for the graphics-card builds.
+  VULKAN_SDK_VERSION: 1.4.313.0
+  VULKAN_SDK_WINDOWS_SHA256: b643ca8ab4aea5c47b9c4e021a0b33b3a13871bf1d8131e162a9e48c257c4694
 jobs:
   build:
     strategy:
@@ -13,17 +21,61 @@ jobs:
       matrix:
         include:
           - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, vulkan: true, suffix: -vulkan }
           - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
           - { os: macos-15, target: aarch64-apple-darwin }
           - { os: macos-15-intel, target: x86_64-apple-darwin }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, ext: .exe }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, ext: .exe, vulkan: true, suffix: -vulkan }
+          # Phones: Termux on Android (64-bit ARM).
+          - { os: ubuntu-22.04, target: aarch64-linux-android, ndk: true }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libasound2-dev cmake clang
+      # Ubuntu 22.04 has no glslc package, so the Vulkan build files come from LunarG's own
+      # package repository for 22.04, pinned to one SDK version. Only the three needed packages
+      # are installed, not the whole SDK.
+      - if: matrix.vulkan && runner.os == 'Linux'
+        name: Vulkan SDK (Linux)
+        run: |
+          curl -fsSL https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc >/dev/null
+          echo "deb https://packages.lunarg.com/vulkan/${VULKAN_SDK_VERSION%.*} jammy main" | sudo tee /etc/apt/sources.list.d/lunarg-vulkan.list
+          sudo apt-get update -qq && sudo apt-get install -y -qq vulkan-headers libvulkan-dev shaderc
+          glslc --version
+      # Windows: LunarG's installer, checked against a pinned SHA-256 and cached once installed.
+      - if: matrix.vulkan && runner.os == 'Windows'
+        id: vulkan-sdk
+        uses: actions/cache@v4
+        with:
+          path: C:\VulkanSDK
+          key: vulkan-sdk-windows-${{ env.VULKAN_SDK_VERSION }}
+      - if: matrix.vulkan && runner.os == 'Windows' && steps.vulkan-sdk.outputs.cache-hit != 'true'
+        name: Vulkan SDK (Windows)
+        shell: pwsh
+        run: |
+          $v = $env:VULKAN_SDK_VERSION
+          $f = Join-Path $env:RUNNER_TEMP 'vulkansdk.exe'
+          curl.exe -fsSL --retry 3 -o $f "https://sdk.lunarg.com/sdk/download/$v/windows/vulkansdk-windows-X64-$v.exe"
+          if ((Get-FileHash $f -Algorithm SHA256).Hash.ToLower() -ne $env:VULKAN_SDK_WINDOWS_SHA256) { throw 'Vulkan SDK installer failed its checksum' }
+          $p = Start-Process $f -Wait -PassThru -ArgumentList '--root', "C:\VulkanSDK\$v", '--accept-licenses', '--default-answer', '--confirm-command', 'install'
+          if ($p.ExitCode -ne 0) { throw "Vulkan SDK installer exited with $($p.ExitCode)" }
+      - if: matrix.vulkan && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $sdk = "C:\VulkanSDK\$env:VULKAN_SDK_VERSION"
+          if (-not (Test-Path "$sdk\Bin\glslc.exe") -or -not (Test-Path "$sdk\Lib\vulkan-1.lib")) { throw 'Vulkan SDK is incomplete' }
+          "VULKAN_SDK=$sdk" >> $env:GITHUB_ENV
+          # A short build folder: the Vulkan shader build nests deep enough to pass the
+          # Windows 260-character path limit under the normal checkout path.
+          "CARGO_TARGET_DIR=C:\t" >> $env:GITHUB_ENV
+          "$sdk\Bin" >> $env:GITHUB_PATH
       - run: rustup toolchain install 1.98.0 --profile minimal && rustup default 1.98.0
+      - if: matrix.ndk
+        run: rustup target add aarch64-linux-android && cargo install cargo-ndk --locked
       - name: Version matches tag
+        if: github.ref_type == 'tag'
         shell: bash
         run: test "v$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" = "${GITHUB_REF_NAME}"
       - name: Build
@@ -36,15 +88,102 @@ jobs:
           else
             export GGML_NATIVE=OFF
           fi
-          cargo build --release --locked --bin 3yiddish
+          if [[ "${{ matrix.ndk }}" == true ]]; then
+            export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" GGML_OPENMP=OFF
+            cargo ndk -t arm64-v8a -P 24 build --release --locked --bin 3yiddish
+            mkdir -p target/release && cp target/aarch64-linux-android/release/3yiddish target/release/
+          elif [[ "${{ matrix.vulkan }}" == true ]]; then
+            cargo build --release --locked --bin 3yiddish --features vulkan
+          else
+            cargo build --release --locked --bin 3yiddish
+          fi
       - shell: bash
-        run: mkdir -p dist && cp target/release/3yiddish${{ matrix.ext }} dist/3yiddish-${{ matrix.target }}${{ matrix.ext }}
+        run: mkdir -p dist && cp "${CARGO_TARGET_DIR:-target}/release/3yiddish${{ matrix.ext }}" dist/3yiddish-${{ matrix.target }}${{ matrix.suffix }}${{ matrix.ext }}
+      # What the Linux x86_64 builds need from the system: the graphics-card build adds only
+      # the Vulkan library, and the regular build must not need it.
+      - if: matrix.target == 'x86_64-unknown-linux-gnu'
+        name: Linked libraries
+        run: |
+          objdump -p dist/3yiddish-* | grep NEEDED | tee needed.txt
+          if grep -Eiq 'wayland|libX|xcb|gtk|gdk|glib' needed.txt; then echo "unexpected desktop library" >&2; exit 1; fi
+          if [[ "${{ matrix.vulkan }}" == true ]]; then
+            grep -q 'libvulkan\.so\.1' needed.txt
+          else
+            ! grep -q vulkan needed.txt
+          fi
       - uses: actions/upload-artifact@v7
         with:
-          name: bin-${{ matrix.target }}
+          name: bin-${{ matrix.target }}${{ matrix.suffix }}
           path: dist/*
-  release:
+  # Run the real installers against the freshly built files (served from this machine), so a
+  # broken installer or a build that does not start stops the release.
+  installers:
     needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      THREE_YIDDISH_BASE: http://127.0.0.1:8000
+      THREE_YIDDISH_SKIP_MODEL: 1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - shell: bash
+        run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - if: runner.os == 'Linux'
+        name: install.sh picks, checks and falls back
+        run: |
+          python3 -m http.server 8000 --bind 127.0.0.1 --directory dist >/dev/null 2>&1 &
+          sleep 2
+          t=x86_64-unknown-linux-gnu
+          try() { # try NAME VARIANT EXPECTED-FILE EXPECTED-LINE
+            THREE_YIDDISH_BIN="$RUNNER_TEMP/$1" THREE_YIDDISH_VARIANT="$2" sh install/install.sh | tee "$RUNNER_TEMP/$1.txt"
+            cmp "$RUNNER_TEMP/$1/3yiddish" "dist/$3"
+            grep -q "$4" "$RUNNER_TEMP/$1.txt"
+          }
+          try cpu cpu "3yiddish-$t" "Installed"
+          if /sbin/ldconfig -p | grep -q 'libvulkan\.so\.1'; then
+            echo "This machine already has the Vulkan library; the fallback is not tried."
+          else
+            try none auto "3yiddish-$t" "No graphics driver found"
+            try fallback gpu "3yiddish-$t" "did not work here"
+          fi
+          sudo apt-get update -qq && sudo apt-get install -y -qq libvulkan1
+          try gpu auto "3yiddish-$t-vulkan" "Using the graphics card"
+          try forced gpu "3yiddish-$t-vulkan" "Installed"
+      - if: runner.os == 'Windows'
+        name: install.ps1 picks, checks and falls back
+        shell: powershell
+        run: |
+          $server = Start-Process python -PassThru -WindowStyle Hidden -ArgumentList '-m', 'http.server', '8000', '--bind', '127.0.0.1', '--directory', 'dist'
+          Start-Sleep 3
+          $t = 'x86_64-pc-windows-msvc'
+          $loader = Test-Path "$env:WINDIR\System32\vulkan-1.dll"
+          Write-Host "vulkan-1.dll present: $loader"
+          function Try-Install($name, $variant, $expected) {
+            $env:THREE_YIDDISH_BIN = Join-Path $env:RUNNER_TEMP $name
+            $env:THREE_YIDDISH_VARIANT = $variant
+            & .\install\install.ps1
+            $got = (Get-FileHash "$env:THREE_YIDDISH_BIN\3yiddish.exe").Hash
+            $want = (Get-FileHash "dist\$expected").Hash
+            if ($got -ne $want) { throw "$name ($variant): installed file is not $expected" }
+            Write-Host "$name ($variant): installed $expected"
+          }
+          $gpuResult = if ($loader) { "3yiddish-$t-vulkan.exe" } else { "3yiddish-$t.exe" }
+          Try-Install cpu cpu "3yiddish-$t.exe"
+          Try-Install auto '' $gpuResult
+          Try-Install forced gpu $gpuResult
+          Stop-Process $server
+  release:
+    needs: [build, installers]
+    # Only a tag publishes; a manual run on a branch stops after the checks above.
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

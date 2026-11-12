@@ -1,5 +1,6 @@
 //! Self-update from GitHub releases. Each release carries one raw binary per platform
-//! (`3yiddish-<target>[.exe]`) and a `SHA256SUMS` file; nothing else is needed.
+//! (`3yiddish-<target>[.exe]`), a graphics-card (Vulkan) build beside it for Windows and
+//! Linux x86_64 (`3yiddish-<target>-vulkan[.exe]`), and a `SHA256SUMS` file.
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
@@ -13,8 +14,36 @@ pub fn target() -> &'static str {
         ("macos", "x86_64") => "x86_64-apple-darwin",
         ("macos", "aarch64") => "aarch64-apple-darwin",
         ("windows", "x86_64") => "x86_64-pc-windows-msvc",
+        ("android", "aarch64") => "aarch64-linux-android",
         _ => "unsupported",
     }
+}
+
+/// Which build this is: "vulkan" for the graphics-card build, "" for the regular one.
+/// macOS always uses the graphics card (Metal) and has a single build.
+pub fn variant() -> &'static str {
+    if cfg!(feature = "vulkan") {
+        "vulkan"
+    } else {
+        ""
+    }
+}
+
+/// The release file name for a platform. A Vulkan build keeps updating to Vulkan builds,
+/// which exist only for Windows and Linux x86_64; anything else gets the regular file.
+pub fn asset_name(target: &str, vulkan: bool) -> String {
+    let gpu = vulkan
+        && matches!(
+            target,
+            "x86_64-unknown-linux-gnu" | "x86_64-pc-windows-msvc"
+        );
+    let variant = if gpu { "-vulkan" } else { "" };
+    let exe = if target.contains("windows") {
+        ".exe"
+    } else {
+        ""
+    };
+    format!("3yiddish-{target}{variant}{exe}")
 }
 
 fn client() -> Result<reqwest::blocking::Client> {
@@ -60,7 +89,7 @@ pub fn update() -> Result<Option<String>> {
         bail!("No release build for this platform");
     }
     let exe = if cfg!(windows) { ".exe" } else { "" };
-    let asset = format!("3yiddish-{target}{exe}");
+    let asset = asset_name(target, variant() == "vulkan");
     let base = format!("https://github.com/{REPO}/releases/download/v{version}");
     let download = reqwest::blocking::Client::builder()
         .user_agent(concat!("3yiddish/", env!("CARGO_PKG_VERSION")))
@@ -110,5 +139,32 @@ mod tests {
     fn versions_compare_numerically() {
         assert!(super::newer("0.1.9", "0.1.10") && !super::newer("0.2.0", "0.2.0"));
         assert_ne!(super::target(), "");
+    }
+
+    #[test]
+    fn asset_names_follow_the_build_variant() {
+        use super::asset_name;
+        let linux = "x86_64-unknown-linux-gnu";
+        let windows = "x86_64-pc-windows-msvc";
+        assert_eq!(asset_name(linux, false), format!("3yiddish-{linux}"));
+        assert_eq!(asset_name(linux, true), format!("3yiddish-{linux}-vulkan"));
+        assert_eq!(
+            asset_name(windows, false),
+            format!("3yiddish-{windows}.exe")
+        );
+        assert_eq!(
+            asset_name(windows, true),
+            format!("3yiddish-{windows}-vulkan.exe")
+        );
+        // No Vulkan release exists for these, so they always name the regular file.
+        for target in [
+            "aarch64-unknown-linux-gnu",
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+            "aarch64-linux-android",
+        ] {
+            assert_eq!(asset_name(target, true), format!("3yiddish-{target}"));
+        }
+        assert_eq!(super::variant() == "vulkan", cfg!(feature = "vulkan"));
     }
 }

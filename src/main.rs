@@ -175,16 +175,18 @@ async fn main() -> Result<()> {
         let summary = *summary;
         let (gold, audio, model, vad) = (gold.clone(), audio.clone(), model.clone(), vad.clone());
         let report = tokio::task::spawn_blocking(move || -> Result<serde_json::Value> {
+            // This command stays in the user's folder, so the home's files are named in full.
+            let home = three_yiddish::paths::home()?;
             let (model, vad) = match model {
                 Some(m) => (m, vad),
                 None => {
-                    let home = three_yiddish::paths::home()?;
                     let (_, m, v) = three_yiddish::model::current(&home.join(three_yiddish::paths::models()))
                         .context("No model installed; pass --model")?;
                     (m, vad.or(v))
                 }
             };
-            let engine = three_yiddish::asr::Engine::load(&model, vad.as_deref())?;
+            let compute = three_yiddish::asr::preferred_at(&home.join(three_yiddish::paths::compute()));
+            let engine = three_yiddish::asr::Engine::load(&model, vad.as_deref(), compute)?;
             let items: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(&gold)?)?;
             let mut scores = Vec::new();
             for item in &items {
@@ -194,7 +196,8 @@ async fn main() -> Result<()> {
                 scores.push(serde_json::json!({"n": item["n"], "score": (1.0 - cer).max(0.0), "heard": heard}));
             }
             let mean = scores.iter().filter_map(|s| s["score"].as_f64()).sum::<f64>() / scores.len().max(1) as f64;
-            let mut report = serde_json::json!({"readings": scores.len(), "score": (mean * 1000.0).round() / 10.0});
+            // The engine is named after the run: a GPU that failed shows up as "cpu" here.
+            let mut report = serde_json::json!({"readings": scores.len(), "score": (mean * 1000.0).round() / 10.0, "engine": engine.compute().name()});
             if !summary {
                 report["items"] = scores.into();
             }
@@ -250,6 +253,7 @@ async fn main() -> Result<()> {
                     ),
                     None => println!("No Transcribe model installed. Run: 3yiddish model pull"),
                 }
+                println!("Engine: {}", three_yiddish::asr::preferred().label());
             }
             ModelAction::Rollback => {
                 println!("Now using {}", three_yiddish::model::rollback(&models)?);
@@ -262,7 +266,11 @@ async fn main() -> Result<()> {
     {
         let bytes = std::fs::read(file).context("Cannot read audio file")?;
         let text = tokio::task::spawn_blocking(move || -> Result<String> {
-            let engine = three_yiddish::asr::Engine::load(&model, vad.as_deref())?;
+            let engine = three_yiddish::asr::Engine::load(
+                &model,
+                vad.as_deref(),
+                three_yiddish::asr::preferred(),
+            )?;
             engine.transcribe(&three_yiddish::asr::decode(bytes)?)
         })
         .await??;
