@@ -1,7 +1,7 @@
 [package]
 name = "three-yiddish"
 default-run = "3yiddish"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 publish = false
 license = "CC-BY-NC-SA-4.0"
@@ -53,6 +53,10 @@ lto = "thin"
 
 
 # Macs get the Apple GPU (Metal) for speech; other platforms use the CPU for now.
+[features]
+# GPU through Vulkan (NVIDIA, AMD, Intel) for Windows and Linux; macOS already uses Metal.
+vulkan = ["whisper-rs/vulkan"]
+
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { version = "0.16", features = ["metal"] }
 
@@ -60,7 +64,7 @@ whisper-rs = { version = "0.16", features = ["metal"] }
 # capture device is often unavailable on PipeWire desktops.
 [target.'cfg(target_os = "linux")'.dependencies]
 cpal = { version = "0.18", features = ["pulseaudio"] }
-rfd = "0.18"
+rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
 
 # Global hold-to-talk key on Windows/macOS. Linux binds keys in the desktop instead, so the
 # Linux binary does not need X11 libraries at runtime.
