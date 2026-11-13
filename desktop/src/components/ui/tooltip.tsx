@@ -21,10 +21,31 @@ function Tooltip({
   return <TooltipPrimitive.Root data-slot="tooltip" {...props} />
 }
 
+/**
+ * Focus opens a tooltip only when it came from the Tab key. Closing a menu or dialog puts focus
+ * back on the button that opened it, and that should not leave its tooltip standing open.
+ */
+let tabbing = false
+if (typeof window !== "undefined") {
+  window.addEventListener("keydown", (e) => (tabbing = e.key === "Tab"), true)
+  window.addEventListener("pointerdown", () => (tabbing = false), true)
+}
+
 function TooltipTrigger({
+  onFocus,
   ...props
 }: React.ComponentProps<typeof TooltipPrimitive.Trigger>) {
-  return <TooltipPrimitive.Trigger data-slot="tooltip-trigger" {...props} />
+  return (
+    <TooltipPrimitive.Trigger
+      data-slot="tooltip-trigger"
+      onFocus={(e) => {
+        onFocus?.(e)
+        // A prevented focus event is skipped by Radix's own handler: no tooltip.
+        if (!tabbing) e.preventDefault()
+      }}
+      {...props}
+    />
+  )
 }
 
 function TooltipContent({
