@@ -11,7 +11,7 @@ import { EntryView, type Entry } from "@/components/entry";
 import { ModelSetup } from "@/components/model-setup";
 import { SettingsDialog } from "@/components/settings-dialog";
 import { ThemeMenu } from "@/components/theme-menu";
-import { Keys } from "@/components/shortcut-setting";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -22,10 +22,11 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Progress as Bar } from "@/components/ui/progress";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { cn } from "@/lib/utils";
+import { cn, ICON } from "@/lib/utils";
 
 const SAVED = "3yiddish.entries";
-const BARS = 48;
+/** Waveform history kept while recording: more than the widest composer shows. */
+const BARS = 320;
 
 function loadEntries(): Entry[] {
   try {
@@ -393,50 +394,51 @@ export default function App() {
 
   return (
     <div className="relative flex h-screen flex-col bg-background text-foreground">
-      <header className="flex items-center justify-between gap-3 border-b px-4 py-2.5">
-        <div className="flex items-center gap-4">
-          <Wordmark className="h-3.5" />
+      {/*
+        The window's own title bar is hidden. The top row holds the window buttons (on a Mac)
+        and the controls; the name and model sit under it. Dragging any empty part moves the window.
+        The Mac's buttons sit 16px from the left and the top (tauri.conf.json's trafficLightPosition:
+        AppKit keeps them 9px above the bottom of a bar it makes 14 + y tall), so their middle is
+        23px down: the row is 46px tall to center the controls there, and the last icon ends 16px
+        from the right (9px of row padding + 7px inside the button).
+      */}
+      <header data-tauri-drag-region className="shrink-0 border-b select-none">
+        <div data-tauri-drag-region className="flex h-[46px] items-center justify-end gap-1 ps-3 pe-[9px]">
           {ready && (
-            <nav className="flex items-center rounded-lg bg-muted p-0.5 text-sm" aria-label="View">
-              {(
-                [
-                  ["chat", "Transcribe"],
-                  ["contribute", "Contribute"],
-                ] as const
-              ).map(([key, label]) => (
-                <button
-                  key={key}
-                  type="button"
-                  aria-current={view === key ? "page" : undefined}
-                  disabled={recording && view !== key}
-                  onClick={() => (key === "chat" ? setView("chat") : openContribute())}
-                  className={cn(
-                    "h-7 rounded-md px-3 font-medium transition-colors disabled:opacity-50",
-                    view === key
-                      ? "bg-background text-foreground shadow-sm dark:bg-input/50"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {label}
-                </button>
-              ))}
-            </nav>
+            <Button
+              variant={view === "contribute" ? "secondary" : "ghost"}
+              size="sm"
+              className="h-7 px-2.5 text-xs"
+              aria-pressed={view === "contribute"}
+              disabled={recording && view !== "contribute"}
+              onClick={() => (view === "contribute" ? setView("chat") : openContribute())}
+            >
+              Contribute
+            </Button>
           )}
-        </div>
-        <div className="flex items-center gap-1">
           {status && (
             <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="sm" className="h-8 gap-1 px-2 text-xs font-medium text-muted-foreground">
-                  {status.compute.toUpperCase()}
-                  <ChevronDown className="size-3.5 opacity-60" />
-                </Button>
-              </DropdownMenuTrigger>
+              <Tooltip delayDuration={0}>
+                <TooltipTrigger asChild>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs font-medium text-muted-foreground">
+                      {status.compute.toUpperCase()}
+                      <ChevronDown className="size-3.5 opacity-60" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                </TooltipTrigger>
+                {status.compute === "gpu" && status.gpuName && <TooltipContent>{status.gpuName}</TooltipContent>}
+              </Tooltip>
               <DropdownMenuContent align="end" className="min-w-32">
                 <DropdownMenuRadioGroup value={status.compute} onValueChange={setCompute}>
-                  <DropdownMenuRadioItem value="gpu" disabled={!status.gpuAvailable} title={status.gpuName ?? undefined}>
-                    GPU
-                  </DropdownMenuRadioItem>
+                  <Tooltip delayDuration={0}>
+                    <TooltipTrigger asChild>
+                      <DropdownMenuRadioItem value="gpu" disabled={!status.gpuAvailable}>
+                        GPU
+                      </DropdownMenuRadioItem>
+                    </TooltipTrigger>
+                    {status.gpuName && <TooltipContent side="left">{status.gpuName}</TooltipContent>}
+                  </Tooltip>
                   <DropdownMenuRadioItem value="cpu">CPU</DropdownMenuRadioItem>
                 </DropdownMenuRadioGroup>
               </DropdownMenuContent>
@@ -448,14 +450,14 @@ export default function App() {
                 <Button
                   size="icon"
                   variant="ghost"
-                  className="relative size-8"
+                  className={cn("relative", ICON)}
                   onClick={checkForUpdates}
                   disabled={pulling || checking}
                   aria-label="Check for updates"
                 >
                   <RefreshCw className={pulling || checking ? "animate-spin" : ""} />
                   {newer && !pulling && (
-                    <span className="absolute top-1.5 right-1.5 size-2 rounded-full bg-red-500 ring-2 ring-background" />
+                    <span className="absolute top-1 right-1 size-1.5 rounded-full bg-red-500 ring-2 ring-background" />
                   )}
                 </Button>
               </TooltipTrigger>
@@ -471,12 +473,27 @@ export default function App() {
           <ThemeMenu />
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button size="icon" variant="ghost" className="size-8" onClick={() => setSettingsOpen(true)} aria-label="Settings">
+              <Button size="icon" variant="ghost" className={ICON} onClick={() => setSettingsOpen(true)} aria-label="Settings">
                 <Settings />
               </Button>
             </TooltipTrigger>
             <TooltipContent>Settings</TooltipContent>
           </Tooltip>
+        </div>
+        <div data-tauri-drag-region className="flex items-center gap-3 px-4 pt-1 pb-3">
+          <button
+            type="button"
+            onClick={() => !recording && setView("chat")}
+            className="rounded-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            aria-label="3Yiddish: back to Transcribe"
+          >
+            <Wordmark className="h-4" />
+          </button>
+          {status?.model && (
+            <Badge variant="secondary" className="font-normal tabular-nums">
+              Model {status.model}
+            </Badge>
+          )}
         </div>
       </header>
 
@@ -492,7 +509,7 @@ export default function App() {
       ) : view === "contribute" ? (
         <ContributeView ready={ready} />
       ) : (
-        <main className="flex-1 overflow-y-auto">
+        <main className="flex-1 overflow-y-auto overscroll-contain">
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-6">
             {entries.length === 0 && !recording && (
               <div className="flex flex-col items-center gap-3 py-24 text-center">
@@ -500,16 +517,9 @@ export default function App() {
                   <Mic className="size-5" />
                 </div>
                 <h1 className="text-xl font-semibold tracking-tight">Say something in Yiddish</h1>
-                <p className="max-w-sm text-sm text-muted-foreground">
-                  Hold <kbd className="rounded border bg-muted px-1.5 py-0.5 text-xs">Space</kbd> or
-                  click the microphone, speak, and the text appears here. Click it to copy. Everything
-                  stays on this computer.
+                <p className="text-sm text-muted-foreground">
+                  {sharing && !owner ? "What you transcribe is shared to improve 3Yiddish." : "Nothing leaves the computer."}
                 </p>
-                {shortcut && (
-                  <p className="flex flex-wrap items-center justify-center gap-1.5 text-sm text-muted-foreground">
-                    In any other program, hold <Keys shortcut={shortcut} /> and the Yiddish is typed there.
-                  </p>
-                )}
               </div>
             )}
             {entries.map((entry) => (

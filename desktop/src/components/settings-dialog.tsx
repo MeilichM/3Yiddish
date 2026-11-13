@@ -105,6 +105,9 @@ export function SettingsDialog({
 
         <div className="flex flex-col gap-3">
           <Group>
+            <Row label={windows ? "Start with Windows" : "Open at login"} htmlFor="autostart">
+              <Switch id="autostart" checked={autostart} onCheckedChange={startAtLogin} />
+            </Row>
             <Row label="Push-to-talk" htmlFor="ptt">
               <Switch id="ptt" checked={!!shortcut} onCheckedChange={pushToTalk} />
             </Row>
@@ -113,11 +116,16 @@ export function SettingsDialog({
                 <ShortcutPicker shortcut={shortcut} onChange={onShortcut} onError={setError} />
               </Row>
             )}
-            <Row label={windows ? "Start with Windows" : "Open at login"} htmlFor="autostart">
-              <Switch id="autostart" checked={autostart} onCheckedChange={startAtLogin} />
-            </Row>
           </Group>
           {error && <p className="px-1 text-xs text-destructive">{error}</p>}
+
+          {sharing != null && (
+            <Group>
+              <Row label="Share transcriptions" htmlFor="sharing">
+                <Switch id="sharing" checked={sharing} onCheckedChange={onSharing} />
+              </Row>
+            </Group>
+          )}
 
           <Group>
             <Row label="Speech model">
@@ -128,11 +136,6 @@ export function SettingsDialog({
                 </Button>
               )}
             </Row>
-            {sharing != null && (
-              <Row label="Share transcriptions" htmlFor="sharing">
-                <Switch id="sharing" checked={sharing} onCheckedChange={onSharing} />
-              </Row>
-            )}
             <Row label="History">
               <span className="text-sm text-muted-foreground tabular-nums">{entries}</span>
               <Button

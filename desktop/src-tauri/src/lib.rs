@@ -212,7 +212,7 @@ fn status(core: Shared) -> Status {
         if asr::gpu_usable() { asr::preferred() } else { Compute::Cpu }
     });
     Status {
-        app_version: env!("CARGO_PKG_VERSION"),
+        app_version: env!("CORE_VERSION"),
         model: model::current(&paths::models()).map(|(v, ..)| v),
         compute: compute.name(),
         gpu_available: asr::gpu_usable(),

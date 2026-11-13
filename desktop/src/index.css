@@ -149,3 +149,16 @@
     scrollbar-color: var(--border) transparent;
   }
 }
+/*
+ * The window never bounces as a whole: only the lists scroll (and stretch at their ends),
+ * while the top bar and the composer stay put.
+ */
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+}

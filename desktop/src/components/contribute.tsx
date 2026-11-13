@@ -417,7 +417,7 @@ export function ContributeView({ ready }: { ready: boolean }) {
       {goal > 0 && <Bar value={Math.min(100, (done / goal) * 100)} className="mx-auto h-1 w-full max-w-2xl px-4" />}
 
       {page === "record" && (
-        <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col items-center justify-center gap-8 overflow-y-auto px-4 py-8">
+        <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col items-center justify-center gap-8 overflow-y-auto overscroll-contain px-4 py-8">
           <div className="text-center">
             <h1 className="text-4xl font-semibold tracking-tight tabular-nums">Take {nextNumber}</h1>
             {goal > 0 && (
@@ -499,7 +499,7 @@ export function ContributeView({ ready }: { ready: boolean }) {
 
       {page === "review" && take && (
         <>
-          <main className="flex-1 overflow-y-auto">
+          <main className="flex-1 overflow-y-auto overscroll-contain">
             <div className="mx-auto flex w-full max-w-2xl flex-col gap-4 px-4 py-4">
               <div className="flex items-center gap-2">
                 {clip ? (
@@ -938,7 +938,7 @@ function TakeList({
 
   return (
     <>
-      <main className="flex-1 overflow-y-auto">
+      <main className="flex-1 overflow-y-auto overscroll-contain">
         <div className="mx-auto flex w-full max-w-2xl flex-col gap-3 px-4 py-4">
           <p className="text-sm text-muted-foreground">{summary}</p>
           {items.length === 0 ? (

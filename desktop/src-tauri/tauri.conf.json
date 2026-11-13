@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "3Yiddish",
-  "version": "0.1.0",
   "identifier": "com.threeyiddish.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -18,7 +17,13 @@
         "minWidth": 420,
         "minHeight": 480,
         "dragDropEnabled": true,
-        "visible": false
+        "visible": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 16,
+          "y": 25
+        }
       }
     ],
     "security": {
@@ -38,7 +43,12 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "signingIdentity": "-",
+      "entitlements": "Entitlements.plist",
+      "minimumSystemVersion": "11.0"
+    }
   },
   "mainBinaryName": "3yiddish-desktop"
 }

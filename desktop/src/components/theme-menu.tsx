@@ -8,6 +8,7 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { ICON } from "@/lib/utils";
 import { setTheme, useTheme, type Theme } from "@/lib/theme";
 
 const OPTIONS = [
@@ -25,7 +26,7 @@ export function ThemeMenu() {
       <Tooltip>
         <TooltipTrigger asChild>
           <DropdownMenuTrigger asChild>
-            <Button size="icon" variant="ghost" className="size-8" aria-label="Appearance">
+            <Button size="icon" variant="ghost" className={ICON} aria-label="Appearance">
               <Icon />
             </Button>
           </DropdownMenuTrigger>

@@ -11,6 +11,13 @@ fn main() {
         })
         .unwrap_or_else(|| "0.0.0".into());
     println!("cargo:rustc-env=CORE_VERSION={version}");
+    // The app is released as the same version as the core (it is what Settings shows).
+    if env!("CARGO_PKG_VERSION") != version {
+        println!(
+            "cargo:warning=desktop version {} differs from the core's {version}: update src-tauri/Cargo.toml and package.json",
+            env!("CARGO_PKG_VERSION")
+        );
+    }
     link_clang_runtime();
     tauri_build::build()
 }

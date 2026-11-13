@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Without this, macOS never asks for the microphone and the app records silence. -->
+  <key>NSMicrophoneUsageDescription</key>
+  <string>3Yiddish listens while you record, to write down what you say. The audio stays on this computer.</string>
+</dict>
+</plist>
