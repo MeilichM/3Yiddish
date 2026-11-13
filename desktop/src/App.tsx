@@ -10,6 +10,7 @@ import { ConsentDialog, ShareDialog } from "@/components/contribute-dialogs";
 import { EntryView, type Entry } from "@/components/entry";
 import { ModelSetup } from "@/components/model-setup";
 import { SettingsDialog } from "@/components/settings-dialog";
+import { ThemeMenu } from "@/components/theme-menu";
 import { Keys } from "@/components/shortcut-setting";
 import { Button } from "@/components/ui/button";
 import {
@@ -467,6 +468,7 @@ export default function App() {
               </TooltipContent>
             </Tooltip>
           )}
+          <ThemeMenu />
           <Tooltip>
             <TooltipTrigger asChild>
               <Button size="icon" variant="ghost" className="size-8" onClick={() => setSettingsOpen(true)} aria-label="Settings">

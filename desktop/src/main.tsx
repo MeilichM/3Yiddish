@@ -3,13 +3,11 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { initTheme, useTheme } from "@/lib/theme";
 import "./index.css";
 
-// Follow the system's light or dark setting, live.
-const dark = window.matchMedia("(prefers-color-scheme: dark)");
-const applyTheme = () => document.documentElement.classList.toggle("dark", dark.matches);
-applyTheme();
-dark.addEventListener("change", applyTheme);
+// Dark, light, or the system's setting (followed live), as chosen in the header.
+initTheme();
 
 // No browser context menu or reload shortcuts: this is an app, not a web page.
 window.addEventListener("contextmenu", (e) => {
@@ -17,11 +15,15 @@ window.addEventListener("contextmenu", (e) => {
   if (!el.closest("input, textarea, [dir='rtl']")) e.preventDefault();
 });
 
+function ThemedToaster() {
+  return <Toaster position="top-center" theme={useTheme()} />;
+}
+
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <TooltipProvider delayDuration={400}>
       <App />
-      <Toaster position="top-center" />
+      <ThemedToaster />
     </TooltipProvider>
   </React.StrictMode>,
 );
