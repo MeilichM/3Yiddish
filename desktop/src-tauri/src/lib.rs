@@ -354,8 +354,13 @@ async fn import_path(path: String, core: Shared<'_>) -> Out<Clip> {
 /// A file handed over as bytes (the + button or Ctrl+V): saved next to the recordings first.
 #[tauri::command]
 async fn import_bytes(request: tauri::ipc::Request<'_>, core: Shared<'_>) -> Out<Clip> {
-    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
-        return Err("Expected the file's bytes".into());
+    // The bytes come raw over Tauri's ipc: protocol (allowed in tauri.conf.json's CSP). If the
+    // webview ever falls back to postMessage, they arrive as a JSON array of numbers instead.
+    let bytes: Vec<u8> = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => bytes.clone(),
+        tauri::ipc::InvokeBody::Json(json) => {
+            serde_json::from_value(json.clone()).map_err(|_| "Expected the file's bytes")?
+        }
     };
     let name = request
         .headers()
