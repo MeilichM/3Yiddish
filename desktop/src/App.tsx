@@ -22,6 +22,7 @@ import {
 import { Progress as Bar } from "@/components/ui/progress";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn, ICON } from "@/lib/utils";
+import { WindowControls, windows } from "@/components/window-controls";
 
 const SAVED = "3yiddish.entries";
 /** Waveform history kept while recording: more than the widest composer shows. */
@@ -383,6 +384,26 @@ export default function App() {
     setEntries([]);
   }
 
+  // The logo and the model. On a Mac they get a row under the window buttons; on Windows,
+  // with no system title bar above them, they start the top row.
+  const brand = (
+    <>
+      <button
+        type="button"
+        onClick={() => !recording && setView("chat")}
+        className="rounded-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+        aria-label="3Yiddish: back to Transcribe"
+      >
+        <Wordmark className="h-4" />
+      </button>
+      {status?.model && (
+        <Badge variant="secondary" className="font-normal tabular-nums">
+          Model {status.model}
+        </Badge>
+      )}
+    </>
+  );
+
   return (
     <div className="relative flex h-screen flex-col bg-background text-foreground">
       {/*
@@ -391,10 +412,20 @@ export default function App() {
         The Mac's buttons sit 16px from the left and the top (tauri.conf.json's trafficLightPosition:
         AppKit keeps them 9px above the bottom of a bar it makes 14 + y tall), so their middle is
         23px down: the row is 46px tall to center the controls there, and the last icon ends 16px
-        from the right (9px of row padding + 7px inside the button).
+        from the right (9px of row padding + 7px inside the button). On Windows the row ends in
+        our own minimize, maximize and close (window-controls.tsx) instead, and the name and
+        model move up into it.
       */}
       <header data-tauri-drag-region className="shrink-0 border-b select-none">
-        <div data-tauri-drag-region className="flex h-[46px] items-center justify-end gap-1 ps-3 pe-[9px]">
+        <div
+          data-tauri-drag-region
+          className={cn("flex h-[46px] items-center justify-end gap-1", windows ? "ps-4 pe-0" : "ps-3 pe-[9px]")}
+        >
+          {windows && (
+            <div data-tauri-drag-region className="me-auto flex items-center gap-3">
+              {brand}
+            </div>
+          )}
           {ready && contributing && (
             <Button
               variant={view === "contribute" ? "secondary" : "ghost"}
@@ -470,22 +501,13 @@ export default function App() {
             </TooltipTrigger>
             <TooltipContent>Settings</TooltipContent>
           </Tooltip>
+          {windows && <WindowControls />}
         </div>
-        <div data-tauri-drag-region className="flex items-center gap-3 px-4 pt-1 pb-3">
-          <button
-            type="button"
-            onClick={() => !recording && setView("chat")}
-            className="rounded-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
-            aria-label="3Yiddish: back to Transcribe"
-          >
-            <Wordmark className="h-4" />
-          </button>
-          {status?.model && (
-            <Badge variant="secondary" className="font-normal tabular-nums">
-              Model {status.model}
-            </Badge>
-          )}
-        </div>
+        {!windows && (
+          <div data-tauri-drag-region className="flex items-center gap-3 px-4 pt-1 pb-3">
+            {brand}
+          </div>
+        )}
       </header>
 
       {pulling && ready && progress && (

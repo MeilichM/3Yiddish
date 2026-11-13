@@ -552,6 +552,14 @@ pub fn run() {
         .manage(Arc::new(Core::default()))
         .setup(|app| {
             tray(app)?;
+            // On Windows the header draws the window buttons itself (window-controls.tsx),
+            // like the Mac's overlay title bar, so the system title bar goes. The shadow keeps
+            // Windows 11's rounded corners and the edges for resizing.
+            #[cfg(windows)]
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_decorations(false);
+                let _ = window.set_shadow(true);
+            }
             // The window is created hidden (no flash of an empty frame) and shown here,
             // unless the app was started at sign-in.
             if !std::env::args().any(|a| a == HIDDEN) {
