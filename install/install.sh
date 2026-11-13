@@ -68,7 +68,7 @@ if [ "$t" = x86_64-unknown-linux-gnu ]; then
     *) echo "THREE_YIDDISH_VARIANT must be cpu or gpu." >&2; exit 1 ;;
   esac
 fi
-echo "Downloading 3Yiddish for $t…"
+echo "Downloading 3Yiddish for ${t}…"
 ok=no
 if [ "$gpu" = yes ]; then
   if get "3yiddish-$t-vulkan"; then
