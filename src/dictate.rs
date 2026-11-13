@@ -231,7 +231,7 @@ fn transcribe(state: &Shared, pcm: &[f32]) -> Result<String> {
 /// Put the text into the focused field. Wayland: `wtype` types it directly. Elsewhere: copy it
 /// and press Ctrl+V (Cmd+V on macOS), then restore the old clipboard. Pasting is far more
 /// reliable for Yiddish letters than simulating each key.
-fn type_text(text: &str) -> Result<()> {
+pub fn type_text(text: &str) -> Result<()> {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         let status = std::process::Command::new("wtype")
             .arg("--")
