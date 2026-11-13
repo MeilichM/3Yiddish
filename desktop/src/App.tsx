@@ -25,6 +25,8 @@ import { cn, ICON } from "@/lib/utils";
 import { WindowControls, windows } from "@/components/window-controls";
 
 const SAVED = "3yiddish.entries";
+/** The Mac's window buttons take the top row's start, so the logo goes under them. */
+const mac = navigator.userAgent.includes("Mac");
 /** Waveform history kept while recording: more than the widest composer shows. */
 const BARS = 320;
 
@@ -384,8 +386,8 @@ export default function App() {
     setEntries([]);
   }
 
-  // The logo and the model. On a Mac they get a row under the window buttons; on Windows,
-  // with no system title bar above them, they start the top row.
+  // The logo and the model. On a Mac they get a row under the window buttons; elsewhere
+  // (Windows, Linux) nothing else is up there, so they start the top row.
   const brand = (
     <>
       <button
@@ -413,15 +415,15 @@ export default function App() {
         AppKit keeps them 9px above the bottom of a bar it makes 14 + y tall), so their middle is
         23px down: the row is 46px tall to center the controls there, and the last icon ends 16px
         from the right (9px of row padding + 7px inside the button). On Windows the row ends in
-        our own minimize, maximize and close (window-controls.tsx) instead, and the name and
-        model move up into it.
+        our own minimize, maximize and close (window-controls.tsx) instead. Off the Mac the name
+        and model move up into the top row.
       */}
       <header data-tauri-drag-region className="shrink-0 border-b select-none">
         <div
           data-tauri-drag-region
-          className={cn("flex h-[46px] items-center justify-end gap-1", windows ? "ps-4 pe-0" : "ps-3 pe-[9px]")}
+          className={cn("flex h-[46px] items-center justify-end gap-1", windows ? "ps-4 pe-0" : mac ? "ps-3 pe-[9px]" : "ps-4 pe-[9px]")}
         >
-          {windows && (
+          {!mac && (
             <div data-tauri-drag-region className="me-auto flex items-center gap-3">
               {brand}
             </div>
@@ -503,7 +505,7 @@ export default function App() {
           </Tooltip>
           {windows && <WindowControls />}
         </div>
-        {!windows && (
+        {mac && (
           <div data-tauri-drag-region className="flex items-center gap-3 px-4 pt-1 pb-3">
             {brand}
           </div>

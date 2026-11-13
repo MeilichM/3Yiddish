@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowUp, Check, ChevronLeft, List, Loader2, Mic, Pause, Play, RotateCcw, Send, Shuffle, X } from "lucide-react";
 import { toast } from "sonner";
 import { api, message, type Clip, type ContributeState, type Mark, type Take } from "@/lib/api";
+import { playable, type Playable } from "@/lib/player";
 import { COLOR, LABEL, REASONS, STATUS, applyMarks, clashes, sortMarks, squash } from "@/lib/marks";
 import { SendDialog } from "@/components/contribute-dialogs";
 import { VoiceNote, duration } from "@/components/voice-note";
@@ -904,7 +905,7 @@ function TakeList({
   const waiting = items.filter((t) => t.status === "pending").length;
   const tossed = items.filter((t) => t.status === "tossed").length;
   const [playing, setPlaying] = useState<number | null>(null);
-  const audio = useRef<HTMLAudioElement | null>(null);
+  const audio = useRef<Playable | null>(null);
 
   useEffect(() => () => audio.current?.pause(), []);
 
@@ -917,7 +918,7 @@ function TakeList({
     try {
       audio.current?.pause();
       const clip = await api.takeClip(t.n);
-      const el = new Audio(await api.audioUrl(clip.path));
+      const el = await playable(clip.path);
       el.onended = () => setPlaying(null);
       audio.current = el;
       setPlaying(t.n);

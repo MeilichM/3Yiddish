@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -21,7 +21,7 @@ use tauri::{
 };
 use three_yiddish::{
     asr::{self, Compute, Engine},
-    audio::Recorder,
+    audio::{Playback, Recorder},
     model, paths,
 };
 
@@ -44,6 +44,9 @@ pub(crate) struct Core {
     /// The last decoded audio, so importing then transcribing a file decodes it once.
     decoded: Mutex<Option<(PathBuf, Arc<Vec<f32>>)>>,
     contribute: contribute::Contribute,
+    /// The voice note playing on the speakers (Linux; see `play_start`) and its number.
+    playback: Mutex<Option<(u32, Playback)>>,
+    plays: AtomicU32,
 }
 
 type Shared<'a> = State<'a, Arc<Core>>;
@@ -420,6 +423,80 @@ fn allow_audio(path: String, app: AppHandle) -> Out<()> {
     app.asset_protocol_scope().allow_file(&path).map_err(fail)
 }
 
+/// Where a voice note playing on the speakers has got.
+#[derive(Serialize)]
+struct Played {
+    at: f32,
+    done: bool,
+}
+
+/// Play a voice note on the speakers from `at` seconds, stopping any other; returns its number
+/// and length. Linux uses this instead of the window's own audio, which needs GStreamer's
+/// audio plugins and takes the window down when they are missing. Mac and Windows play in
+/// the window.
+#[tauri::command]
+async fn play_start(path: String, at: f32, core: Shared<'_>) -> Out<(u32, Option<f32>)> {
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = PathBuf::from(path);
+        if !path.is_file() {
+            return Err("The recording is no longer on this computer.".into());
+        }
+        if let Some((_, mut old)) = core.playback.lock().map_err(fail)?.take() {
+            old.stop();
+        }
+        let playback = Playback::start(&path).map_err(fail)?;
+        if at > 0.0 {
+            playback.seek(at);
+        }
+        let seconds = playback.seconds();
+        let id = core.plays.fetch_add(1, Ordering::Relaxed) + 1;
+        *core.playback.lock().map_err(fail)? = Some((id, playback));
+        Ok((id, seconds))
+    })
+    .await
+    .map_err(fail)?
+}
+
+/// Where voice note `id` has got; `None` once another one took the speakers or it stopped.
+#[tauri::command]
+fn play_position(id: u32, core: Shared) -> Option<Played> {
+    let mut slot = core.playback.lock().ok()?;
+    let (playing, playback) = slot.as_mut()?;
+    if *playing != id {
+        return None;
+    }
+    let done = playback.done();
+    let at = playback.position().unwrap_or(0.0);
+    if done {
+        *slot = None;
+    }
+    Some(Played { at, done })
+}
+
+/// Pause or resume voice note `id`; false when it no longer holds the speakers.
+#[tauri::command]
+fn play_pause(id: u32, paused: bool, core: Shared) -> bool {
+    if let Ok(slot) = core.playback.lock()
+        && let Some((playing, playback)) = slot.as_ref()
+        && *playing == id
+    {
+        playback.set_paused(paused);
+        return true;
+    }
+    false
+}
+
+#[tauri::command]
+fn play_seek(id: u32, at: f32, core: Shared) {
+    if let Ok(slot) = core.playback.lock()
+        && let Some((playing, playback)) = slot.as_ref()
+        && *playing == id
+    {
+        playback.seek(at);
+    }
+}
+
 /// Delete a recording the app made (never a file the user dropped in from elsewhere).
 #[tauri::command]
 fn forget_audio(path: String) -> Out<()> {
@@ -616,6 +693,10 @@ pub fn run() {
             transcribe,
             allow_audio,
             forget_audio,
+            play_start,
+            play_position,
+            play_pause,
+            play_seek,
             contribute::contribute_state,
             contribute::contribute_set,
             contribute::take_from,

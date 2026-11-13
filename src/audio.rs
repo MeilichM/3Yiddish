@@ -320,6 +320,14 @@ mod native {
             }
         }
 
+        /// How far playback has got, in seconds, when known.
+        pub fn position(&self) -> Option<f32> {
+            match self {
+                Self::Native(_, player, _) => Some(player.get_pos().as_secs_f32()),
+                Self::External(_) => None,
+            }
+        }
+
         /// Jump to `seconds` from the start.
         pub fn seek(&self, seconds: f32) {
             if let Self::Native(_, player, _) = self {

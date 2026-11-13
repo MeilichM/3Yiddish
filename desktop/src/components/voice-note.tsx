@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Pause, Play } from "lucide-react";
 import { toast } from "sonner";
 import { api, message, type Clip } from "@/lib/api";
+import { playable, type Playable } from "@/lib/player";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -23,10 +24,10 @@ export function duration(seconds: number) {
 }
 
 /** Only one voice note plays at a time. */
-let playing: HTMLAudioElement | null = null;
+let playing: Playable | null = null;
 
 export function VoiceNote({ clip, className }: { clip: Clip; className?: string }) {
-  const audio = useRef<HTMLAudioElement | null>(null);
+  const audio = useRef<Playable | null>(null);
   const [isPlaying, setPlaying] = useState(false);
   const [at, setAt] = useState(0);
   const [missing, setMissing] = useState(false);
@@ -35,7 +36,7 @@ export function VoiceNote({ clip, className }: { clip: Clip; className?: string 
 
   async function load() {
     if (audio.current) return audio.current;
-    const el = new Audio(await audioUrl(clip.path));
+    const el = await playable(clip.path, () => audioUrl(clip.path));
     el.ontimeupdate = () => setAt(el.currentTime);
     el.onplay = () => setPlaying(true);
     el.onpause = () => setPlaying(false);
