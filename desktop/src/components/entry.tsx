@@ -1,4 +1,4 @@
-import { Check, Copy, FileAudio, RotateCcw, Trash2 } from "lucide-react";
+import { Check, Copy, FileAudio, RotateCcw, Send, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import type { Clip, Compute } from "@/lib/api";
@@ -26,10 +26,13 @@ export function EntryView({
   entry,
   onRetry,
   onRemove,
+  onContribute,
 }: {
   entry: Entry;
   onRetry: () => void;
   onRemove: () => void;
+  /** Open this one in Contribute, to fix and send; only while Contribute is switched on. */
+  onContribute?: () => void;
 }) {
   const [copied, setCopied] = useState(false);
 
@@ -115,10 +118,25 @@ export function EntryView({
                   </TooltipTrigger>
                   <TooltipContent>Remove</TooltipContent>
                 </Tooltip>
+                {onContribute && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button size="icon" variant="ghost" className="size-7" onClick={onContribute} aria-label="Contribute this one">
+                        <Send />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Contribute this one: fix it and send</TooltipContent>
+                  </Tooltip>
+                )}
               </div>
-              <span className="px-2 tabular-nums">
+              {/* The time always, in the corner; how it was made next to it, only on hover. */}
+              <span className="flex items-center gap-1.5 px-2 tabular-nums">
+                {entry.ms != null && (
+                  <span className="opacity-0 transition-opacity group-hover:opacity-100">
+                    {(entry.ms / 1000).toFixed(1)}s on {entry.compute?.toUpperCase()} ·
+                  </span>
+                )}
                 {when(entry.at)}
-                {entry.ms != null && ` · ${(entry.ms / 1000).toFixed(1)}s on ${entry.compute?.toUpperCase()}`}
               </span>
             </div>
           </>

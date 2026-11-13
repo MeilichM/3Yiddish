@@ -16,10 +16,11 @@ use std::{
 
 /// What sharing sends, where it goes and what it is for: the words a yes is given to (the
 /// first-run question, the Sharing card and `3yiddish share on` all show them).
-pub const WHAT: &str = "What you transcribe here, your recordings and files with the text the \
-    app wrote, is sent to 3Yiddish with technical facts: app and model version, operating \
-    system, GPU or CPU, how long it took, and errors. No name or computer id goes with it. It \
-    is kept privately and used to test, and maybe later to improve, Yiddish speech to text.";
+pub const WHAT: &str = "What you transcribe here from now on, your recordings and files with \
+    the text the app wrote, is sent to 3Yiddish with technical facts: app and model version, \
+    operating system, GPU or CPU, how long it took, and errors. What you transcribed before is \
+    not sent. No name or computer id goes with it. It is kept privately and used to test, and \
+    maybe later to improve, Yiddish speech to text.";
 /// How to switch it off.
 pub const OFF: &str =
     "You can switch it off any time with Sharing at the top, or: 3yiddish share off";

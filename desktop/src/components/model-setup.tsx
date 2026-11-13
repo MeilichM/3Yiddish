@@ -23,11 +23,21 @@ export function ModelSetup({
   return (
     <div className="flex flex-1 items-center justify-center p-6">
       <div className="flex w-full max-w-md flex-col gap-5 rounded-2xl border bg-card p-6 text-card-foreground shadow-sm">
-        <div className="flex flex-col gap-1.5">
-          <h2 className="text-lg font-semibold tracking-tight">One more step: the speech model</h2>
+        <div className="flex flex-col gap-2 rounded-xl bg-muted/60 p-4">
+          <p className="flex items-center gap-2 font-semibold">
+            <ShieldCheck className="size-5 shrink-0" />
+            Nothing leaves your computer.
+          </p>
           <p className="text-sm text-muted-foreground">
-            3Yiddish turns your speech into text right here on your computer. For that it needs its
-            speech model, about 575 MB, downloaded once.
+            3Yiddish listens and writes right here, on this computer. Your recordings and what they
+            say are never sent anywhere, unless you yourself switch on sharing in Settings.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <h2 className="text-lg font-semibold tracking-tight">One step: the speech model</h2>
+          <p className="text-sm text-muted-foreground">
+            To do that, 3Yiddish needs its speech model, about 575 MB, downloaded once.
           </p>
         </div>
 
@@ -49,10 +59,7 @@ export function ModelSetup({
 
         {error && <p className="text-sm text-destructive">{error}</p>}
 
-        <p className="flex items-start gap-2 text-xs text-muted-foreground">
-          <ShieldCheck className="mt-px size-4 shrink-0" />
-          It is checked after download. After that, your recordings never leave this computer.
-        </p>
+        <p className="text-xs text-muted-foreground">It is checked after download.</p>
       </div>
     </div>
   );

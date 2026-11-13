@@ -82,7 +82,8 @@ Yes. It all runs on your computer, and your voice stays there unless you say oth
 - The first time you open the app it asks whether to share what you transcribe. The
   answer is **No** unless you pick Yes.
 - **CONTRIBUTE** tells you what it sends before you accept, and accepting it turns
-  sharing on too.
+  sharing on too. Sharing only sends what you transcribe after it is on, never anything
+  from before.
 - Changed your mind? Click **Sharing** at the top, or run `3yiddish share off`. That
   also deletes anything still waiting to be sent.
 

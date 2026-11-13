@@ -90,8 +90,6 @@ export interface ContributeState {
   idea: string;
   name: string;
   sharing: boolean;
-  /** The first-run sharing question should show. */
-  askShare: boolean;
 }
 
 export interface Review {
@@ -102,10 +100,10 @@ export interface Review {
 
 export const api = {
   contributeState: () => invoke<ContributeState>("contribute_state"),
-  contributeAccept: () => invoke<boolean>("contribute_accept"),
-  shareSet: (yes: boolean) => invoke<boolean>("share_set", { yes }),
+  contributeSet: (on: boolean) => invoke<{ accepted: boolean; sharing: boolean }>("contribute_set", { on }),
   ideaNext: () => invoke<string>("idea_next"),
   takeFinish: () => invoke<Take>("take_finish"),
+  takeFrom: (path: string, text: string, engine?: string) => invoke<Take>("take_from", { path, text, engine }),
   takeRetry: () => invoke<Take>("take_retry"),
   takeReview: (n: number, review: Review) => invoke<Take>("take_review", { n, review }),
   takeDelete: (n: number) => invoke<void>("take_delete", { n }),

@@ -39,12 +39,12 @@ export function SettingsDialog({
   entries,
   onRollback,
   onClearHistory,
-  sharing,
-  onSharing,
+  contributing,
+  onContributing,
 }: {
-  /** Sharing what is transcribed; null where it is never offered (the owner's computer). */
-  sharing: boolean | null;
-  onSharing: (on: boolean) => void;
+  /** The Contribute switch; null where nothing is ever sent (the owner's computer). */
+  contributing: boolean | null;
+  onContributing: (on: boolean) => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   shortcut: string | null;
@@ -119,12 +119,20 @@ export function SettingsDialog({
           </Group>
           {error && <p className="px-1 text-xs text-destructive">{error}</p>}
 
-          {sharing != null && (
-            <Group>
-              <Row label="Share transcriptions" htmlFor="sharing">
-                <Switch id="sharing" checked={sharing} onCheckedChange={onSharing} />
-              </Row>
-            </Group>
+          {contributing != null && (
+            <div className="flex flex-col gap-2">
+              <Group>
+                <Row label="Contribute" htmlFor="contribute">
+                  <Switch id="contribute" checked={contributing} onCheckedChange={onContributing} />
+                </Row>
+              </Group>
+              <p className="px-1 text-xs leading-relaxed text-muted-foreground">
+                Off: nothing leaves your computer. On: what you transcribe from now on, the
+                recordings with their text and technical facts (no name), is sent to 3Yiddish to
+                test and improve Yiddish speech to text; nothing from before is sent. It also adds
+                Contribute at the top, for recording takes you check and send yourself.
+              </p>
+            </div>
           )}
 
           <Group>

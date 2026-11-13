@@ -2860,7 +2860,7 @@ const EXPLAIN: [&str; 6] = [
 const TERMS: [&str; 3] = [
     "Your takes stay on this computer until you press Send. What you send is used to test, and maybe later to improve, Yiddish speech to text, and may be published as a test set under any name you choose.",
     "",
-    "Accepting also switches on sharing: what you transcribe in the rest of the app, your recordings and files with the text the app wrote and technical facts, is sent to 3Yiddish, kept privately, and used to test and maybe later improve it. You can switch it off any time with Sharing at the top, or: 3yiddish share off",
+    "Accepting also switches on sharing: what you transcribe in the rest of the app from now on, your recordings and files with the text the app wrote and technical facts, is sent to 3Yiddish, kept privately, and used to test and maybe later improve it. What you transcribed before is not sent. You can switch it off any time with Sharing at the top, or: 3yiddish share off",
 ];
 /// What contributing means, with Never mind and I accept under it. Shown until accepted.
 pub(super) fn draw_consent(frame: &mut Frame, region: Rect, hits: &mut Vec<Hit>) {

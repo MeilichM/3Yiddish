@@ -85,27 +85,24 @@ pub(crate) fn contribute_state(core: Shared) -> Out<Value> {
         "idea": idea(c),
         "name": std::fs::read_to_string(paths::contributor_name()).unwrap_or_default().trim(),
         "sharing": share::on(),
-        "askShare": share::ask(),
     }))
 }
 
-/// "I accept" under the Contribute explanation: remembered, and sharing switched on (which
-/// the text says). Is sharing on now.
+/// The Contribute switch in Settings (off unless switched on; nothing is asked anywhere).
+/// On: Contribute is accepted, which switches on sharing (never on the owner's own computer).
+/// Off: both are off again, and what is waiting to be sent is deleted.
 #[tauri::command]
-pub(crate) fn contribute_accept() -> Out<bool> {
-    share::accept_contribute().map_err(fail)
-}
-
-/// The answer to "Share what you transcribe?" (the first-run question, or Settings). No also
-/// deletes what is waiting to be sent.
-#[tauri::command]
-pub(crate) fn share_set(yes: bool) -> Out<bool> {
-    let yes = yes && !phone::owner();
-    share::set(yes).map_err(fail)?;
-    if yes {
+pub(crate) fn contribute_set(on: bool) -> Out<Value> {
+    if on {
+        share::accept_contribute().map_err(fail)?;
         nudge(false);
+    } else {
+        let _ = std::fs::remove_file(paths::contribute_accepted());
+        if !phone::owner() {
+            share::set(false).map_err(fail)?;
+        }
     }
-    Ok(yes)
+    Ok(json!({"accepted": phone::playground(), "sharing": share::on()}))
 }
 
 /// Another idea, never the same one twice in a row.
@@ -180,6 +177,30 @@ fn draft(core: &Core, pcm: Vec<f32>) -> Out<Value> {
     let _guard = core.contribute.store.lock().map_err(fail)?;
     let take = store().add(&pcm, &text, model).map_err(fail)?;
     Ok(shown(&take))
+}
+
+/// A transcription from the chat as a new take, to review and send like one recorded in
+/// Contribute: its recording, and the text the app wrote for it as the draft.
+#[tauri::command]
+pub(crate) async fn take_from(path: String, text: String, engine: Option<String>, core: Shared<'_>) -> Out<Value> {
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = std::fs::read(&path).map_err(|_| "The recording is gone.")?;
+        let pcm = asr::decode(bytes).map_err(fail)?;
+        let seconds = pcm.len() as f32 / 16_000.0;
+        if seconds < 0.5 {
+            return Err("That recording is too short to contribute.".to_owned());
+        }
+        if seconds > 600.0 {
+            return Err("That recording is too long to contribute: keep a take under ten minutes.".to_owned());
+        }
+        let version = model::current(&paths::models()).map(|(v, ..)| v).unwrap_or_default();
+        let model = json!({"name": format!("3Yiddish-Transcribe {version}"), "engine": engine});
+        let _guard = core.contribute.store.lock().map_err(fail)?;
+        store().add(&pcm, &text, model).map(|t| shown(&t)).map_err(fail)
+    })
+    .await
+    .map_err(fail)?
 }
 
 /// Save what the speaker decided about a take: its marks, the text typed out, or Toss.

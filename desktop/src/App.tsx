@@ -6,7 +6,6 @@ import { toast } from "sonner";
 import { api, message, type Compute, type Progress, type Status } from "@/lib/api";
 import { Composer } from "@/components/composer";
 import { ContributeView } from "@/components/contribute";
-import { ConsentDialog, ShareDialog } from "@/components/contribute-dialogs";
 import { EntryView, type Entry } from "@/components/entry";
 import { ModelSetup } from "@/components/model-setup";
 import { SettingsDialog } from "@/components/settings-dialog";
@@ -65,11 +64,10 @@ export default function App() {
   const [ptt, setPtt] = useState(false);
   /** Transcribe (the chat) or Contribute (record takes to test the model). */
   const [view, setView] = useState<"chat" | "contribute">("chat");
-  const [accepted, setAccepted] = useState(false);
+  /** The Contribute switch in Settings: off until switched on. */
+  const [contributing, setContributing] = useState(false);
   const [owner, setOwner] = useState(false);
   const [sharing, setSharing] = useState(false);
-  const [consentOpen, setConsentOpen] = useState(false);
-  const [shareAsk, setShareAsk] = useState(false);
   const bottom = useRef<HTMLDivElement>(null);
   const queue = useRef<Promise<unknown>>(Promise.resolve());
   const busy = useRef(false); // a start/stop is on its way
@@ -125,46 +123,39 @@ export default function App() {
     return () => void off.then((f) => f());
   }, []);
 
-  // Contribute and sharing: accepted here before? Sharing on? The first-run question is asked
-  // once (never on the owner's own computer).
+  // Contributing is off unless switched on in Settings; nothing about it is ever asked. (Sharing
+  // switched on in an earlier version, or in the terminal app, counts as on.)
   useEffect(() => {
     api
       .contributeState()
       .then((s) => {
-        setAccepted(s.accepted);
         setOwner(s.owner);
+        setContributing(s.owner || s.accepted || s.sharing);
         setSharing(s.sharing);
-        if (s.askShare) setShareAsk(true);
       })
       .catch(() => {});
   }, []);
 
-  async function answerShare(yes: boolean) {
-    setShareAsk(false);
+  /** A chat transcription into Contribute: a new take with its recording and text, opened to review. */
+  async function contributeEntry(entry: Entry) {
+    if (recording) return;
     try {
-      const on = await api.shareSet(yes);
-      if (sharing && !on) toast("Sharing is off.");
-      setSharing(on);
-    } catch (e) {
-      toast.error(`Cannot save your answer: ${message(e)}`);
-    }
-  }
-
-  async function acceptContribute() {
-    setConsentOpen(false);
-    try {
-      setSharing(await api.contributeAccept());
-      setAccepted(true);
+      await api.takeFrom(entry.clip.path, entry.text ?? "", entry.compute);
       setView("contribute");
     } catch (e) {
-      toast.error(`Cannot save your answer: ${message(e)}`);
+      toast.error(message(e));
     }
   }
 
-  function openContribute() {
-    if (recording) return;
-    if (accepted) setView("contribute");
-    else setConsentOpen(true);
+  async function setContribute(on: boolean) {
+    try {
+      const s = await api.contributeSet(on);
+      setContributing(on && (s.accepted || s.sharing));
+      setSharing(s.sharing);
+      if (!on && view === "contribute") setView("chat");
+    } catch (e) {
+      toast.error(`Cannot save the setting: ${message(e)}`);
+    }
   }
 
   useEffect(() => {
@@ -404,16 +395,16 @@ export default function App() {
       */}
       <header data-tauri-drag-region className="shrink-0 border-b select-none">
         <div data-tauri-drag-region className="flex h-[46px] items-center justify-end gap-1 ps-3 pe-[9px]">
-          {ready && (
+          {ready && contributing && (
             <Button
               variant={view === "contribute" ? "secondary" : "ghost"}
               size="sm"
               className="h-7 px-2.5 text-xs"
               aria-pressed={view === "contribute"}
               disabled={recording && view !== "contribute"}
-              onClick={() => (view === "contribute" ? setView("chat") : openContribute())}
+              onClick={() => setView(view === "contribute" ? "chat" : "contribute")}
             >
-              Contribute
+              Contributing
             </Button>
           )}
           {status && (
@@ -518,7 +509,9 @@ export default function App() {
                 </div>
                 <h1 className="text-xl font-semibold tracking-tight">Say something in Yiddish</h1>
                 <p className="text-sm text-muted-foreground">
-                  {sharing && !owner ? "What you transcribe is shared to improve 3Yiddish." : "Nothing leaves the computer."}
+                  {sharing && !owner
+                    ? "Contribute is on: what you transcribe is sent to 3Yiddish. Switch it off in Settings."
+                    : "Nothing leaves your computer."}
                 </p>
               </div>
             )}
@@ -528,6 +521,7 @@ export default function App() {
                 entry={entry}
                 onRetry={() => transcribe(entry)}
                 onRemove={() => remove(entry)}
+                onContribute={contributing ? () => contributeEntry(entry) : undefined}
               />
             ))}
             <div ref={bottom} />
@@ -559,12 +553,10 @@ export default function App() {
         entries={entries.length}
         onRollback={rollback}
         onClearHistory={clearHistory}
-        sharing={owner ? null : sharing}
-        onSharing={(on) => (on ? setShareAsk(true) : answerShare(false))}
+        contributing={owner ? null : contributing}
+        onContributing={setContribute}
       />
 
-      <ConsentDialog open={consentOpen} onOpenChange={setConsentOpen} onAccept={acceptContribute} />
-      <ShareDialog open={shareAsk} onAnswer={answerShare} onDismiss={() => setShareAsk(false)} />
 
       {dragging && ready && (
         <div className="pointer-events-none absolute inset-2 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary/60 bg-background/80 backdrop-blur-sm">
