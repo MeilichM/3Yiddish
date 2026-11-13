@@ -34,6 +34,8 @@
     --color-secondary: var(--secondary);
     --color-primary-foreground: var(--primary-foreground);
     --color-primary: var(--primary);
+    --color-brand-red: var(--brand-red);
+    --color-brand-blue: var(--brand-blue);
     --color-popover-foreground: var(--popover-foreground);
     --color-popover: var(--popover);
     --color-card-foreground: var(--card-foreground);
@@ -74,6 +76,9 @@
     --chart-4: oklch(0.371 0 0);
     --chart-5: oklch(0.269 0 0);
     --radius: 0.625rem;
+    /* 3Yiddish's brand colors (the logo's red and blue), deeper on a light background. */
+    --brand-red: #e0435f;
+    --brand-blue: #2e6fdc;
     --sidebar: oklch(0.985 0 0);
     --sidebar-foreground: oklch(0.145 0 0);
     --sidebar-primary: oklch(0.205 0 0);
@@ -85,6 +90,8 @@
 }
 
 .dark {
+    --brand-red: #f7768e;
+    --brand-blue: #7aa2f7;
     --background: oklch(0.145 0 0);
     --foreground: oklch(0.985 0 0);
     --card: oklch(0.205 0 0);

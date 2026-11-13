@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ChevronDown, FileAudio, Mic, RefreshCw, Settings } from "lucide-react";
+import { Wordmark } from "@/components/brand";
 import { toast } from "sonner";
 import { api, message, type Compute, type Progress, type Status } from "@/lib/api";
 import { Composer } from "@/components/composer";
+import { ContributeView } from "@/components/contribute";
+import { ConsentDialog, ShareDialog } from "@/components/contribute-dialogs";
 import { EntryView, type Entry } from "@/components/entry";
 import { ModelSetup } from "@/components/model-setup";
 import { SettingsDialog } from "@/components/settings-dialog";
 import { Keys } from "@/components/shortcut-setting";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -19,6 +21,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Progress as Bar } from "@/components/ui/progress";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
 
 const SAVED = "3yiddish.entries";
 const BARS = 48;
@@ -58,6 +61,13 @@ export default function App() {
   const [checking, setChecking] = useState(false);
   /** The take going now came from the push-to-talk shortcut. */
   const [ptt, setPtt] = useState(false);
+  /** Transcribe (the chat) or Contribute (record takes to test the model). */
+  const [view, setView] = useState<"chat" | "contribute">("chat");
+  const [accepted, setAccepted] = useState(false);
+  const [owner, setOwner] = useState(false);
+  const [sharing, setSharing] = useState(false);
+  const [consentOpen, setConsentOpen] = useState(false);
+  const [shareAsk, setShareAsk] = useState(false);
   const bottom = useRef<HTMLDivElement>(null);
   const queue = useRef<Promise<unknown>>(Promise.resolve());
   const busy = useRef(false); // a start/stop is on its way
@@ -113,6 +123,48 @@ export default function App() {
     return () => void off.then((f) => f());
   }, []);
 
+  // Contribute and sharing: accepted here before? Sharing on? The first-run question is asked
+  // once (never on the owner's own computer).
+  useEffect(() => {
+    api
+      .contributeState()
+      .then((s) => {
+        setAccepted(s.accepted);
+        setOwner(s.owner);
+        setSharing(s.sharing);
+        if (s.askShare) setShareAsk(true);
+      })
+      .catch(() => {});
+  }, []);
+
+  async function answerShare(yes: boolean) {
+    setShareAsk(false);
+    try {
+      const on = await api.shareSet(yes);
+      if (sharing && !on) toast("Sharing is off.");
+      setSharing(on);
+    } catch (e) {
+      toast.error(`Cannot save your answer: ${message(e)}`);
+    }
+  }
+
+  async function acceptContribute() {
+    setConsentOpen(false);
+    try {
+      setSharing(await api.contributeAccept());
+      setAccepted(true);
+      setView("contribute");
+    } catch (e) {
+      toast.error(`Cannot save your answer: ${message(e)}`);
+    }
+  }
+
+  function openContribute() {
+    if (recording) return;
+    if (accepted) setView("contribute");
+    else setConsentOpen(true);
+  }
+
   useEffect(() => {
     try {
       localStorage.setItem(SAVED, JSON.stringify(entries.slice(-200)));
@@ -133,7 +185,7 @@ export default function App() {
     update(entry.clip.id, { state: "transcribing", error: undefined });
     queue.current = queue.current.then(async () => {
       try {
-        const t = await api.transcribe(entry.clip.path);
+        const t = await api.transcribe(entry.clip.path, entry.recorded);
         update(entry.clip.id, { state: "done", text: t.text, ms: t.ms, compute: t.compute });
         setStatus((s) => (s ? { ...s, compute: t.compute } : s));
       } catch (e) {
@@ -203,16 +255,17 @@ export default function App() {
     return () => clearInterval(timer);
   }, [recording, cancel]);
 
-  // Hold Space to talk; Esc cancels.
+  // Hold Space to talk; Esc cancels. (Contribute has its own keys.)
   useEffect(() => {
+    if (view !== "chat") return;
     const down = (e: KeyboardEvent) => {
-      if (e.code === "Space" && !e.repeat && !typing(e.target)) {
+      if ((e.code === "Space" || e.key === " ") && !e.repeat && !typing(e.target)) {
         e.preventDefault();
         void start();
       } else if (e.code === "Escape") cancel();
     };
     const up = (e: KeyboardEvent) => {
-      if (e.code === "Space" && !typing(e.target)) {
+      if ((e.code === "Space" || e.key === " ") && !typing(e.target)) {
         e.preventDefault();
         void stop();
       }
@@ -223,7 +276,7 @@ export default function App() {
       window.removeEventListener("keydown", down);
       window.removeEventListener("keyup", up);
     };
-  }, [start, stop, cancel]);
+  }, [start, stop, cancel, view]);
 
   // ---- Files: drag and drop, + button, paste ----
   const importFiles = useCallback(
@@ -241,6 +294,7 @@ export default function App() {
 
   useEffect(() => {
     const off = getCurrentWebview().onDragDropEvent(async (e) => {
+      if (view !== "chat") return;
       if (e.payload.type === "enter" || e.payload.type === "over") setDragging(true);
       else if (e.payload.type === "leave") setDragging(false);
       else if (e.payload.type === "drop") {
@@ -256,19 +310,19 @@ export default function App() {
       }
     });
     return () => void off.then((f) => f());
-  }, [add, ready]);
+  }, [add, ready, view]);
 
   useEffect(() => {
     const paste = (e: ClipboardEvent) => {
       const files = Array.from(e.clipboardData?.files ?? []);
-      if (files.length && ready) {
+      if (files.length && ready && view === "chat") {
         e.preventDefault();
         void importFiles(files);
       }
     };
     window.addEventListener("paste", paste);
     return () => window.removeEventListener("paste", paste);
-  }, [importFiles, ready]);
+  }, [importFiles, ready, view]);
 
   // ---- Model ----
   async function pull() {
@@ -339,12 +393,33 @@ export default function App() {
   return (
     <div className="relative flex h-screen flex-col bg-background text-foreground">
       <header className="flex items-center justify-between gap-3 border-b px-4 py-2.5">
-        <div className="flex items-center gap-2">
-          <span className="text-base font-semibold tracking-tight">3Yiddish</span>
-          {status?.model && (
-            <Badge variant="secondary" className="font-normal tabular-nums">
-              Model {status.model}
-            </Badge>
+        <div className="flex items-center gap-4">
+          <Wordmark className="h-3.5" />
+          {ready && (
+            <nav className="flex items-center rounded-lg bg-muted p-0.5 text-sm" aria-label="View">
+              {(
+                [
+                  ["chat", "Transcribe"],
+                  ["contribute", "Contribute"],
+                ] as const
+              ).map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  aria-current={view === key ? "page" : undefined}
+                  disabled={recording && view !== key}
+                  onClick={() => (key === "chat" ? setView("chat") : openContribute())}
+                  className={cn(
+                    "h-7 rounded-md px-3 font-medium transition-colors disabled:opacity-50",
+                    view === key
+                      ? "bg-background text-foreground shadow-sm dark:bg-input/50"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </nav>
           )}
         </div>
         <div className="flex items-center gap-1">
@@ -412,6 +487,8 @@ export default function App() {
 
       {status && !ready ? (
         <ModelSetup progress={progress} busy={pulling} error={pullError} onDownload={pull} />
+      ) : view === "contribute" ? (
+        <ContributeView ready={ready} />
       ) : (
         <main className="flex-1 overflow-y-auto">
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-6">
@@ -446,7 +523,7 @@ export default function App() {
         </main>
       )}
 
-      <footer className="mx-auto w-full max-w-3xl px-4 pb-4">
+      <footer className={cn("mx-auto w-full max-w-3xl px-4 pb-4", view !== "chat" && "hidden")}>
         <Composer
           recording={recording}
           pushToTalk={ptt}
@@ -470,7 +547,12 @@ export default function App() {
         entries={entries.length}
         onRollback={rollback}
         onClearHistory={clearHistory}
+        sharing={owner ? null : sharing}
+        onSharing={(on) => (on ? setShareAsk(true) : answerShare(false))}
       />
+
+      <ConsentDialog open={consentOpen} onOpenChange={setConsentOpen} onAccept={acceptContribute} />
+      <ShareDialog open={shareAsk} onAnswer={answerShare} onDismiss={() => setShareAsk(false)} />
 
       {dragging && ready && (
         <div className="pointer-events-none absolute inset-2 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary/60 bg-background/80 backdrop-blur-sm">

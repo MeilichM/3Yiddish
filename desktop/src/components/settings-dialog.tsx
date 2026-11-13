@@ -39,7 +39,12 @@ export function SettingsDialog({
   entries,
   onRollback,
   onClearHistory,
+  sharing,
+  onSharing,
 }: {
+  /** Sharing what is transcribed; null where it is never offered (the owner's computer). */
+  sharing: boolean | null;
+  onSharing: (on: boolean) => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   shortcut: string | null;
@@ -123,6 +128,11 @@ export function SettingsDialog({
                 </Button>
               )}
             </Row>
+            {sharing != null && (
+              <Row label="Share transcriptions" htmlFor="sharing">
+                <Switch id="sharing" checked={sharing} onCheckedChange={onSharing} />
+              </Row>
+            )}
             <Row label="History">
               <span className="text-sm text-muted-foreground tabular-nums">{entries}</span>
               <Button

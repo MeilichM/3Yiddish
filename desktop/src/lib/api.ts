@@ -53,7 +53,65 @@ export type PttEvent =
   | { state: "done"; id: string; transcript: Transcript; typed: boolean }
   | { state: "error"; id: string; error: string };
 
+/** One marked span of a take's draft (word numbers; start == end: a missing word there). */
+export interface Mark {
+  start: number;
+  end: number;
+  heard?: string;
+  /** What it should be; null: no correction, only flagged. */
+  right: string | null;
+  reason: string;
+  note: string;
+}
+
+export type TakeStatus = "pending" | "correct" | "fixed" | "tossed";
+
+/** A Contribute take, as kept by the core's free bench. */
+export interface Take {
+  n: number;
+  seconds: number;
+  draft: string;
+  words: string[];
+  final: string;
+  typed: boolean;
+  status: TakeStatus;
+  marks: Mark[];
+  sent?: string | null;
+}
+
+export interface ContributeState {
+  /** The Contribute explanation was accepted here. */
+  accepted: boolean;
+  owner: boolean;
+  /** How many takes make the set; 0 for a contributor. */
+  goal: number;
+  canSend: boolean;
+  items: Take[];
+  idea: string;
+  name: string;
+  sharing: boolean;
+  /** The first-run sharing question should show. */
+  askShare: boolean;
+}
+
+export interface Review {
+  marks: Mark[];
+  typed: string | null;
+  toss: boolean;
+}
+
 export const api = {
+  contributeState: () => invoke<ContributeState>("contribute_state"),
+  contributeAccept: () => invoke<boolean>("contribute_accept"),
+  shareSet: (yes: boolean) => invoke<boolean>("share_set", { yes }),
+  ideaNext: () => invoke<string>("idea_next"),
+  takeFinish: () => invoke<Take>("take_finish"),
+  takeRetry: () => invoke<Take>("take_retry"),
+  takeReview: (n: number, review: Review) => invoke<Take>("take_review", { n, review }),
+  takeDelete: (n: number) => invoke<void>("take_delete", { n }),
+  takeClip: (n: number) => invoke<Clip>("take_clip", { n }),
+  sendTakes: (name: string) => invoke<{ sent: number; left: number }>("send_takes", { name }),
+
   autostartGet: () => invoke<boolean>("autostart_get"),
   autostartSet: (on: boolean) => invoke<void>("autostart_set", { on }),
   shortcutGet: () => invoke<ShortcutInfo>("shortcut_get"),
@@ -76,7 +134,7 @@ export const api = {
     invoke<Clip>("import_bytes", new Uint8Array(await file.arrayBuffer()), {
       headers: { "x-file-name": encodeURIComponent(file.name) },
     }),
-  transcribe: (path: string) => invoke<Transcript>("transcribe", { path }),
+  transcribe: (path: string, recorded: boolean) => invoke<Transcript>("transcribe", { path, recorded }),
   /** A URL the window can play the file from (streamed from disk). */
   audioUrl: async (path: string) => {
     await invoke<void>("allow_audio", { path });

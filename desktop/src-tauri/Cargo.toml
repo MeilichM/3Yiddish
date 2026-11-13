@@ -28,6 +28,10 @@ anyhow = "1"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
+# The same versions the core uses (nothing new is compiled): Send's request to 3Yiddish.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+sha2 = "0.11"
+tokio = { version = "1", features = ["time"] }
 
 [features]
 # Graphics card through Vulkan (Windows, Linux). macOS always uses Metal.

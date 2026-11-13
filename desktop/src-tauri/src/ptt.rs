@@ -114,7 +114,7 @@ fn release(app: AppHandle, core: Arc<Core>) {
         let id = clip.id.clone();
         let path = clip.path.clone();
         let _ = app.emit("ptt", Event::Transcribing { clip });
-        match transcribe_blocking(&core, &path) {
+        match transcribe_blocking(&core, &path, true) {
             Ok(transcript) => {
                 // Typed into the app the person is in; when that is this window, the text is
                 // already on screen and pasting it would go nowhere useful.

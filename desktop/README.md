@@ -10,6 +10,12 @@ macro key...) in **Settings** (the gear), or switch it off there. While it is on
 the window keeps 3Yiddish in the tray so the shortcut keeps working; **Start with Windows**
 in Settings starts it there at sign-in.
 
+**Contribute** (top of the window) is the terminal app's playground: say something in your
+own words, read what the model wrote, click the words it got wrong and fix them, and press
+**Send** when you have a few. It shows what contributing means first and keeps the takes in
+the same place as the terminal app (`state/contributions/`). **Share transcriptions** in
+Settings is the terminal app's sharing: asked once, off unless you say yes.
+
 It is a [Tauri](https://tauri.app) app: the speech engine is the 3Yiddish Rust library in this
 repository (`../src`), called directly in the same process. The window is React with
 [shadcn/ui](https://ui.shadcn.com) components; JavaScript is only used to build it, nothing
@@ -62,6 +68,8 @@ pip install --target $env:USERPROFILE\.ninja ninja
 - `src-tauri/src/lib.rs`: the Rust commands the window calls (microphone, transcribe, model
   download, GPU/CPU, tray, start at sign-in).
 - `src-tauri/src/ptt.rs`: push-to-talk (the global shortcut, record, transcribe, type).
+- `src-tauri/src/contribute.rs`: Contribute and sharing, on the core's `freebench`, `phone`
+  and `share`.
 - `src/App.tsx`: the main screen. `src/components/`: voice notes, the composer, first-run
   setup, settings.
 - `src/components/ui/`: shadcn components (copied in, edit freely).

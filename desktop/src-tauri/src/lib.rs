@@ -1,6 +1,8 @@
 //! 3Yiddish desktop: a native window around the same Rust core the terminal app uses.
 //! Everything runs in this process: microphone, model download and transcription. No server,
-//! no terminal, and nothing is sent anywhere (sharing is not wired into the desktop app).
+//! no terminal. Nothing is sent anywhere unless the person says yes to sharing or presses
+//! Send under Contribute (`contribute.rs`).
+mod contribute;
 mod ptt;
 
 use serde::Serialize;
@@ -41,6 +43,7 @@ pub(crate) struct Core {
     shortcut_error: Mutex<Option<String>>,
     /// The last decoded audio, so importing then transcribing a file decodes it once.
     decoded: Mutex<Option<(PathBuf, Arc<Vec<f32>>)>>,
+    contribute: contribute::Contribute,
 }
 
 type Shared<'a> = State<'a, Arc<Core>>;
@@ -159,16 +162,33 @@ pub(crate) fn save_take(core: &Core, pcm: Vec<f32>) -> Out<Clip> {
     Ok(clip)
 }
 
-pub(crate) fn transcribe_blocking(core: &Core, path: &str) -> Out<Transcript> {
-    let engine = core.engine().map_err(fail)?;
-    let pcm = core.decode(Path::new(path)).map_err(fail)?;
+/// Transcribe one file. `recorded`: made in the app (else a file brought in), which sharing
+/// is told when it is on.
+pub(crate) fn transcribe_blocking(core: &Core, path: &str, recorded: bool) -> Out<Transcript> {
     let began = Instant::now();
-    let text = engine.transcribe(&pcm).map_err(fail)?;
-    Ok(Transcript {
-        text: text.trim().to_owned(),
-        ms: began.elapsed().as_millis() as u64,
-        compute: engine.compute().name(),
-    })
+    let mut engine_name = None;
+    let result = (|| {
+        let engine = core.engine().map_err(fail)?;
+        engine_name = Some(engine.compute().name());
+        let pcm = core.decode(Path::new(path)).map_err(fail)?;
+        let began = Instant::now();
+        let text = engine.transcribe(&pcm).map_err(fail)?;
+        // The GPU may have given way to the CPU on first use.
+        engine_name = Some(engine.compute().name());
+        Ok(Transcript {
+            text: text.trim().to_owned(),
+            ms: began.elapsed().as_millis() as u64,
+            compute: engine.compute().name(),
+        })
+    })();
+    contribute::shared(
+        Path::new(path),
+        recorded,
+        began.elapsed(),
+        engine_name,
+        &result.as_ref().map(|t| t.text.clone()).map_err(Clone::clone),
+    );
+    result
 }
 
 #[derive(Serialize, Clone)]
@@ -377,9 +397,9 @@ fn percent_decode(s: &str) -> String {
 }
 
 #[tauri::command]
-async fn transcribe(path: String, core: Shared<'_>) -> Out<Transcript> {
+async fn transcribe(path: String, recorded: bool, core: Shared<'_>) -> Out<Transcript> {
     let core = core.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || transcribe_blocking(&core, &path))
+    tauri::async_runtime::spawn_blocking(move || transcribe_blocking(&core, &path, recorded))
         .await
         .map_err(fail)?
 }
@@ -546,6 +566,8 @@ pub fn run() {
                 }
                 Err(e) => *core.shortcut_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e),
             }
+            // Shared transcriptions that have waited an hour go now.
+            contribute::nudge(false);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -581,7 +603,23 @@ pub fn run() {
             transcribe,
             allow_audio,
             forget_audio,
+            contribute::contribute_state,
+            contribute::contribute_accept,
+            contribute::share_set,
+            contribute::idea_next,
+            contribute::take_finish,
+            contribute::take_retry,
+            contribute::take_review,
+            contribute::take_delete,
+            contribute::take_clip,
+            contribute::send_takes,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running 3Yiddish");
+        .build(tauri::generate_context!())
+        .expect("error while building 3Yiddish")
+        .run(|_app, event| {
+            // Quitting: shared transcriptions still waiting go now (as the terminal app does).
+            if let tauri::RunEvent::Exit = event {
+                contribute::flush();
+            }
+        });
 }
