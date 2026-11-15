@@ -31,6 +31,23 @@ The score is the plain average of three parts: words right, the place in each ta
 gets full points, worst gets none), and the share of takes with nothing wrong. It depends
 on who else is in the table, so it moves when tools are added.
 
+**Small models**
+
+We looked for every small, free Yiddish model that could run on a phone or an old laptop,
+and ran the ones that exist:
+
+| Model | Wrong words per 100 | What it writes |
+|---|---|---|
+| Yiddi Type, fast model | 31.6 | Real heimish Yiddish with many wrong words; one take got stuck repeating a word |
+| Omnilingual ASR CTC 300M | 61.3 | Recognisable Yiddish, spelled by rough sound and run together |
+| Whisper medium (plain) | 95.9 | Garble in Yiddish letters; one take came out in English |
+| Whisper small (plain) | 97.1 | Garble; one take is a single sound repeated |
+| Whisper base, Yiddish word-list cut (alphaedge) | 226 | Nonsense with long repeat loops |
+| Whisper tiny, Yiddish word-list cut (alphaedge) | 302 | English babble |
+
+The only small model trained on heimish speech is the one inside Yiddi Type. There is no
+good small heimish model to download today.
+
 **How it was judged**
 
 - One speaker read the transcripts of Yiddish Labs, Yiddish Tools and 3Yiddish without
