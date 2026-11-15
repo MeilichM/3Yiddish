@@ -75,6 +75,10 @@ good small heimish model to download today.
 - Yiddi Type is a Windows program. We scored the small model that comes inside it, with
   the program's own settings, without the program's extra clean-up steps. It also offers
   a larger model, which the program describes as ivrit-ai's.
+- TurboScribe and RocketScribe are not in the table. Both say they run Whisper, and their
+  free tiers allowed only three takes and one take. What came back was the same kind of
+  output as the plain Whisper rows: rough sound-spelling from one, German in Latin letters
+  from the other.
 - Open models ran with the settings their authors give. 3Yiddish ran as the app runs it.
 
 **What to keep in mind**
