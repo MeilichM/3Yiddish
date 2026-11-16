@@ -26,7 +26,10 @@ function apply() {
 
 export function initTheme() {
   apply();
-  systemDark.addEventListener("change", apply);
+  systemDark.addEventListener("change", () => {
+    apply();
+    listeners.forEach((l) => l());
+  });
 }
 
 export function setTheme(next: Theme) {
@@ -47,4 +50,9 @@ function subscribe(listener: () => void) {
 
 export function useTheme(): Theme {
   return useSyncExternalStore(subscribe, () => theme);
+}
+
+/** Whether the page is dark right now: the choice, or the system's setting when "system". */
+export function useDark(): boolean {
+  return useSyncExternalStore(subscribe, () => document.documentElement.classList.contains("dark"));
 }

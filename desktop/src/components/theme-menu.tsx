@@ -9,7 +9,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ICON } from "@/lib/utils";
-import { setTheme, useTheme, type Theme } from "@/lib/theme";
+import { setTheme, useDark, useTheme, type Theme } from "@/lib/theme";
 
 const OPTIONS = [
   ["dark", "Dark", Moon],
@@ -20,7 +20,8 @@ const OPTIONS = [
 /** The header's appearance button: dark, light, or whatever the system uses. */
 export function ThemeMenu() {
   const theme = useTheme();
-  const Icon = OPTIONS.find(([key]) => key === theme)![2];
+  // The button shows the look in use, a moon or a sun, even when it follows the system.
+  const Icon = useDark() ? Moon : Sun;
   return (
     <DropdownMenu>
       <Tooltip>
