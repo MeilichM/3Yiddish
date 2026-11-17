@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowUp, Check, ChevronLeft, List, Loader2, Mic, Pause, Play, RotateCcw, Send, Shuffle, X } from "lucide-react";
+import { Check, ChevronLeft, List, Loader2, Mic, Pause, Play, RotateCcw, Send, Shuffle, X } from "lucide-react";
 import { toast } from "sonner";
 import { api, message, type Clip, type ContributeState, type Mark, type Take } from "@/lib/api";
 import { playable, type Playable } from "@/lib/player";
@@ -21,6 +21,54 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { cn } from "@/lib/utils";
 
 type Page = "record" | "review" | "list";
+
+/** The flow, shown at the top: where you are in it. */
+const STEPS = ["Say it", "Fix what it heard", "Send"];
+
+function Steps({ at }: { at: number }) {
+  const step = (i: number) => (
+    <span className="flex shrink-0 items-center gap-2">
+      <span
+        className={cn(
+          "flex size-5 items-center justify-center rounded-full border text-[11px] font-medium tabular-nums",
+          i < at && "border-transparent bg-foreground/15 text-foreground",
+          i === at && "border-transparent bg-primary text-primary-foreground",
+          i > at && "text-muted-foreground",
+        )}
+      >
+        {i < at ? <Check className="size-3" /> : i + 1}
+      </span>
+      <span className={cn("whitespace-nowrap", i === at ? "font-medium" : "text-muted-foreground")}>{STEPS[i]}</span>
+    </span>
+  );
+  const line = (lit: boolean) => <span className={cn("mx-3 h-px min-w-4 flex-1", lit ? "bg-foreground/40" : "bg-border")} />;
+  // Three columns, the outer two equal: the middle step sits in the exact middle.
+  return (
+    <div
+      aria-label={`Step ${at + 1} of ${STEPS.length}: ${STEPS[at]}`}
+      className="mx-auto grid w-full max-w-2xl grid-cols-[1fr_auto_1fr] items-center px-4 py-3 text-xs"
+    >
+      <span className="flex items-center">
+        {step(0)}
+        {line(at >= 1)}
+      </span>
+      {step(1)}
+      <span className="flex items-center">
+        {line(at >= 2)}
+        {step(2)}
+      </span>
+    </div>
+  );
+}
+
+/** A key, as shown inside a button. */
+function Key({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd className="rounded border border-current/25 px-1.5 py-px font-sans text-[11px] font-medium opacity-70">
+      {children}
+    </kbd>
+  );
+}
 type Span = { start: number; end: number };
 const BARS = 40;
 const MAX_SECONDS = 180;
@@ -394,7 +442,9 @@ export function ContributeView({ ready }: { ready: boolean }) {
       <div className="mx-auto flex w-full max-w-2xl items-center gap-2 px-4 pt-3 pb-1">
         {page === "record" ? (
           <span className="text-sm text-muted-foreground">
-            {goal ? `${done} of ${goal} done` : done ? `${done} done` : "Contribute"}
+            Take {nextNumber}
+            {goal > 0 && ` of ${goal}`}
+            {done > 0 && <span className="text-muted-foreground/70"> · {done} done</span>}
           </span>
         ) : (
           <Button variant="ghost" size="sm" className="-ml-2" onClick={() => (page === "review" ? leaveReview() : setPage("record"))}>
@@ -419,81 +469,96 @@ export function ContributeView({ ready }: { ready: boolean }) {
 
       {page === "record" && (
         <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col items-center justify-center gap-8 overflow-y-auto overscroll-contain px-4 py-8">
-          <div className="text-center">
-            <h1 className="text-4xl font-semibold tracking-tight tabular-nums">Take {nextNumber}</h1>
-            {goal > 0 && (
-              <p className="mt-1 text-sm text-muted-foreground">
-                {done >= goal ? `The set of ${goal} is complete. More is fine.` : `of ${goal}`}
-              </p>
-            )}
-          </div>
+          {goal > 0 && done >= goal && (
+            <p className="text-sm text-muted-foreground">The set of {goal} is complete. More is fine.</p>
+          )}
 
           {state.idea && (
-            <div className="flex w-full items-center gap-3 rounded-xl border bg-card p-4">
-              <div className="min-w-0 flex-1">
-                <p className="text-xs text-muted-foreground">An idea, if you want one</p>
-                <p dir="rtl" lang="yi" className="mt-1 text-xl leading-relaxed">
-                  {state.idea}
-                </p>
+            <div className="flex w-full flex-col gap-1.5">
+              {/* What the idea is, and another one, together above it. */}
+              <div className="flex items-center gap-1 px-1">
+                <p className="text-xs text-muted-foreground">An idea, if you want one. Say it in your own words.</p>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-6 text-muted-foreground"
+                      onClick={nextIdea}
+                      disabled={recording}
+                      aria-label="Another idea"
+                    >
+                      <Shuffle className="size-3.5" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Another idea</TooltipContent>
+                </Tooltip>
               </div>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button variant="ghost" size="icon" onClick={nextIdea} disabled={recording} aria-label="Another idea">
-                    <Shuffle />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>Another idea</TooltipContent>
-              </Tooltip>
+              <p dir="rtl" lang="yi" className="w-full rounded-xl border bg-card p-4 text-xl leading-relaxed">
+                {state.idea}
+              </p>
             </div>
           )}
 
-          <div className="flex h-24 w-full flex-col items-center justify-center gap-3 text-center">
-            {recording ? (
-              <>
-                <span className="text-3xl font-semibold text-red-500 tabular-nums">{duration(seconds)}</span>
-                <div className="flex h-12 w-full max-w-md items-center justify-center gap-[3px]">
-                  {levels.map((l, i) => (
-                    <span
-                      key={i}
-                      className="w-1 rounded-full bg-red-500/80"
-                      style={{ height: `${Math.max(8, Math.min(100, l * 140))}%` }}
-                    />
-                  ))}
-                </div>
-              </>
-            ) : thinking ? (
-              <p className="flex items-center gap-2 text-sm">
-                <Loader2 className="size-4 animate-spin" /> Writing down what you said
-              </p>
-            ) : retry ? (
-              <Button variant="outline" onClick={() => draft(api.takeRetry)}>
+          {/* One control, everything it needs to say inside it: record, recording, writing down. */}
+          <div className="flex items-center gap-2">
+            {retry && !recording && !thinking ? (
+              <Button size="lg" variant="outline" className="h-14 rounded-full px-7 text-base" onClick={() => draft(api.takeRetry)}>
                 <RotateCcw /> Send it again
               </Button>
             ) : (
-              <p className="text-sm text-muted-foreground">
-                {ready ? "Click, and say it in your own words." : "Waiting for the speech model…"}
-              </p>
+              <button
+                type="button"
+                onClick={recording ? stopRecording : startRecording}
+                disabled={thinking || (!ready && !recording)}
+                aria-label={recording ? "Done" : "Record"}
+                className={cn(
+                  "flex h-14 items-center gap-3 rounded-full px-7 text-base font-medium transition-all outline-none focus-visible:ring-4 focus-visible:ring-ring/40 disabled:opacity-60",
+                  recording
+                    ? "bg-red-500 text-white ring-8 ring-red-500/15"
+                    : "bg-primary text-primary-foreground enabled:hover:scale-[1.03]",
+                )}
+              >
+                {recording ? (
+                  <>
+                    <span className="size-3 rounded-[3px] bg-white" />
+                    <span className="w-11 text-start tabular-nums">{duration(seconds)}</span>
+                    <span className="flex h-6 w-40 items-center gap-[3px]" aria-hidden>
+                      {levels.slice(-BARS / 2).map((l, i) => (
+                        <span
+                          key={i}
+                          className="w-[3px] flex-1 rounded-full bg-white/80"
+                          style={{ height: `${Math.max(12, Math.min(100, l * 140))}%` }}
+                        />
+                      ))}
+                    </span>
+                    Done <Key>Space</Key>
+                  </>
+                ) : thinking ? (
+                  <>
+                    <Loader2 className="size-5 animate-spin" /> Writing down what you said
+                  </>
+                ) : !ready ? (
+                  <>
+                    <Loader2 className="size-5 animate-spin" /> Waiting for the speech model
+                  </>
+                ) : (
+                  <>
+                    <Mic className="size-5" /> Record <Key>Space</Key>
+                  </>
+                )}
+              </button>
             )}
-          </div>
-
-          <div className="flex flex-col items-center gap-3">
-            <button
-              type="button"
-              onClick={recording ? stopRecording : startRecording}
-              disabled={thinking || (!ready && !recording)}
-              aria-label={recording ? "Stop" : "Record"}
-              className={cn(
-                "flex size-20 items-center justify-center rounded-full transition-all outline-none focus-visible:ring-4 focus-visible:ring-ring/40 disabled:opacity-40",
-                recording
-                  ? "bg-red-500 text-white ring-8 ring-red-500/20"
-                  : "bg-primary text-primary-foreground hover:scale-105",
-              )}
-            >
-              {recording ? <ArrowUp className="size-8" /> : <Mic className="size-8" />}
-            </button>
-            <p className="text-xs text-muted-foreground">
-              {recording ? "Click or press Space to finish · Esc cancels" : "or press Space"}
-            </p>
+            {recording && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button variant="ghost" size="icon" className="size-10 rounded-full" onClick={cancelRecording} aria-label="Cancel">
+                    <X />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Cancel (Esc)</TooltipContent>
+              </Tooltip>
+            )}
           </div>
         </main>
       )}
@@ -611,6 +676,9 @@ export function ContributeView({ ready }: { ready: boolean }) {
           </footer>
         </>
       )}
+
+      {/* Where you are in the flow, along the bottom. */}
+      {(page === "record" || (page === "review" && take)) && <Steps at={page === "record" ? 0 : 1} />}
 
       {page === "list" && (
         <TakeList
