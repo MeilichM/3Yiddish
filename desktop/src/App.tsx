@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { ChevronDown, FileAudio, Mic, RefreshCw, Settings } from "lucide-react";
+import { ChevronDown, FileAudio, LoaderCircle, Mic, Settings } from "lucide-react";
 import { Wordmark } from "@/components/brand";
 import { toast } from "sonner";
 import { api, message, type Compute, type Progress, type Status } from "@/lib/api";
@@ -10,7 +10,7 @@ import { EntryView, type Entry } from "@/components/entry";
 import { ModelSetup } from "@/components/model-setup";
 import { SettingsDialog } from "@/components/settings-dialog";
 import { ThemeMenu } from "@/components/theme-menu";
-import { Badge } from "@/components/ui/badge";
+import { badgeVariants } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -339,7 +339,7 @@ export default function App() {
     }
   }
 
-  /** The update button: download the newer model when there is one, else look for one. */
+  /** The model tag: download the newer model when there is one, else look for one. */
   async function checkForUpdates() {
     if (pulling || checking) return;
     if (newer) return pull();
@@ -350,6 +350,8 @@ export default function App() {
         setNewer(v);
         await pull();
       } else toast.success("You have the latest speech model.");
+    } catch (e) {
+      toast.error(`Cannot check for a newer model: ${message(e)}`);
     } finally {
       setChecking(false);
     }
@@ -399,9 +401,35 @@ export default function App() {
         <Wordmark className="h-4" />
       </button>
       {status?.model && (
-        <Badge variant="secondary" className="font-normal tabular-nums">
-          Model {status.model}
-        </Badge>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              onClick={checkForUpdates}
+              disabled={pulling || checking}
+              aria-label={newer ? `Model ${status.model}: download model ${newer}` : `Model ${status.model}: check for a newer model`}
+              className={cn(
+                badgeVariants({ variant: "secondary" }),
+                "relative cursor-pointer gap-1 overflow-visible font-normal tabular-nums hover:bg-secondary/70 disabled:cursor-default",
+              )}
+            >
+              {(pulling || checking) && <LoaderCircle className="animate-spin" />}
+              Model {status.model}
+              {newer && !pulling && (
+                <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-red-500 ring-2 ring-background" />
+              )}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>
+            {pulling
+              ? "Downloading the new model…"
+              : checking
+                ? "Looking for a newer model…"
+                : newer
+                  ? `New speech model ${newer}: click to download`
+                  : "Check for a newer model"}
+          </TooltipContent>
+        </Tooltip>
       )}
     </>
   );
@@ -467,32 +495,6 @@ export default function App() {
                 </DropdownMenuRadioGroup>
               </DropdownMenuContent>
             </DropdownMenu>
-          )}
-          {ready && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  className={cn("relative", ICON)}
-                  onClick={checkForUpdates}
-                  disabled={pulling || checking}
-                  aria-label="Check for updates"
-                >
-                  <RefreshCw className={pulling || checking ? "animate-spin" : ""} />
-                  {newer && !pulling && (
-                    <span className="absolute top-1 right-1 size-1.5 rounded-full bg-red-500 ring-2 ring-background" />
-                  )}
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>
-                {pulling
-                  ? "Downloading the new model…"
-                  : newer
-                    ? `New speech model ${newer}: click to download`
-                    : "Check for updates"}
-              </TooltipContent>
-            </Tooltip>
           )}
           <ThemeMenu />
           <Tooltip>

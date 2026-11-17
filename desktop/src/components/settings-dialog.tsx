@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
 import { api, message } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -11,6 +12,7 @@ import {
 } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
 import { ShortcutPicker } from "@/components/shortcut-setting";
+import { About } from "@/components/about";
 
 const windows = navigator.userAgent.includes("Windows");
 
@@ -61,9 +63,14 @@ export function SettingsDialog({
   const [last, setLast] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
+  /** Settings shows the About page instead of the settings. */
+  const [about, setAbout] = useState(false);
 
   useEffect(() => {
-    if (!open) return setConfirmClear(false);
+    if (!open) {
+      setAbout(false);
+      return setConfirmClear(false);
+    }
     api.autostartGet().then(setAutostart);
     api.shortcutGet().then((info) => {
       setFallback(info.default);
@@ -99,10 +106,26 @@ export function SettingsDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="gap-5 sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Settings</DialogTitle>
-          <DialogDescription className="sr-only">3Yiddish settings</DialogDescription>
+          <DialogTitle className="flex items-center gap-1">
+            {about && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="-ms-2 size-7"
+                onClick={() => setAbout(false)}
+                aria-label="Back to Settings"
+              >
+                <ChevronLeft />
+              </Button>
+            )}
+            {about ? "About" : "Settings"}
+          </DialogTitle>
+          <DialogDescription className="sr-only">{about ? "About 3Yiddish" : "3Yiddish settings"}</DialogDescription>
         </DialogHeader>
 
+        {about ? (
+          <About appVersion={appVersion} model={model} />
+        ) : (
         <div className="flex flex-col gap-3">
           <Group>
             <Row label={windows ? "Start with Windows" : "Open at login"} htmlFor="autostart">
@@ -161,9 +184,22 @@ export function SettingsDialog({
               </Button>
             </Row>
           </Group>
-        </div>
 
-        {appVersion && <p className="text-center text-xs text-muted-foreground">Version {appVersion}</p>}
+          <Group>
+            <button
+              type="button"
+              onClick={() => setAbout(true)}
+              className="flex min-h-12 w-full items-center justify-between gap-4 rounded-xl px-4 py-2 text-start text-sm outline-none hover:bg-accent/50 focus-visible:bg-accent"
+            >
+              About
+              <span className="flex items-center gap-1 text-muted-foreground">
+                {appVersion && <span className="text-xs tabular-nums">Version {appVersion}</span>}
+                <ChevronRight className="size-4" />
+              </span>
+            </button>
+          </Group>
+        </div>
+        )}
       </DialogContent>
     </Dialog>
   );
