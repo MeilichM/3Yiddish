@@ -68,7 +68,7 @@ export function Composer({
   const picker = useRef<HTMLInputElement>(null);
 
   return (
-    <div className="flex items-center gap-2 rounded-2xl border bg-card p-2 shadow-sm">
+    <div className="flex items-center gap-2 rounded-2xl border bg-card/60 p-2 shadow-lg shadow-black/5 backdrop-blur-2xl backdrop-saturate-150">
       <input
         ref={picker}
         type="file"

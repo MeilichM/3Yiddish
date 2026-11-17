@@ -71,7 +71,13 @@ export default function App() {
   const [contributing, setContributing] = useState(false);
   const [owner, setOwner] = useState(false);
   const [sharing, setSharing] = useState(false);
-  const bottom = useRef<HTMLDivElement>(null);
+  /** The chat's scroller, and the composer floating over its bottom. */
+  const scroller = useRef<HTMLElement>(null);
+  const floating = useRef<HTMLElement>(null);
+  /** How tall the floating composer is: the chat leaves that much room under the last message. */
+  const [under, setUnder] = useState(0);
+  /** The chat's scrollbar width: the composer leaves it free too, so both line up exactly. */
+  const [gutter, setGutter] = useState(0);
   const queue = useRef<Promise<unknown>>(Promise.resolve());
   const busy = useRef(false); // a start/stop is on its way
 
@@ -169,8 +175,27 @@ export default function App() {
   }, [entries]);
 
   useEffect(() => {
-    bottom.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    const el = scroller.current;
+    el?.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [entries.length, recording]);
+
+  useEffect(() => {
+    const el = floating.current;
+    const chat = scroller.current;
+    if (!el) return;
+    const measure = () => {
+      setUnder(el.offsetHeight);
+      setGutter(chat ? chat.offsetWidth - chat.clientWidth : 0);
+    };
+    const watch = new ResizeObserver(measure);
+    watch.observe(el);
+    if (chat) {
+      watch.observe(chat);
+      // The scrollbar comes and goes with the content, which resizes the column inside.
+      if (chat.firstElementChild) watch.observe(chat.firstElementChild);
+    }
+    return () => watch.disconnect();
+  }, [view, ready]);
 
   const update = (id: string, patch: Partial<Entry>) =>
     setEntries((all) => all.map((e) => (e.clip.id === id ? { ...e, ...patch } : e)));
@@ -521,13 +546,19 @@ export default function App() {
         </div>
       )}
 
+      {/* The messages run to the window's bottom edge, under the composer, which floats over
+          them with a heavy blur; the last message can still scroll clear above it. */}
+      <div className="relative flex min-h-0 flex-1 flex-col">
       {status && !ready ? (
         <ModelSetup progress={progress} busy={pulling} error={pullError} onDownload={pull} />
       ) : view === "contribute" ? (
         <ContributeView ready={ready} />
       ) : (
-        <main className="flex-1 overflow-y-auto overscroll-contain">
-          <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-6">
+        <main ref={scroller} className="flex-1 overflow-y-auto overscroll-contain">
+          <div
+            className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 pt-6"
+            style={{ paddingBottom: under + 24 }}
+          >
             {entries.length === 0 && !recording && (
               <div className="flex flex-col items-center gap-3 py-24 text-center">
                 <div className="flex size-12 items-center justify-center rounded-2xl border bg-card">
@@ -550,12 +581,18 @@ export default function App() {
                 onContribute={() => contributeEntry(entry)}
               />
             ))}
-            <div ref={bottom} />
           </div>
         </main>
       )}
 
-      <footer className={cn("mx-auto w-full max-w-3xl px-4 pb-4", view !== "chat" && "hidden")}>
+      <footer
+        ref={floating}
+        style={{ right: gutter }}
+        className={cn(
+          "pointer-events-none absolute bottom-0 left-0 mx-auto max-w-3xl px-4 pb-4 *:pointer-events-auto",
+          view !== "chat" && "hidden",
+        )}
+      >
         <Composer
           recording={recording}
           pushToTalk={ptt}
@@ -568,6 +605,7 @@ export default function App() {
           onFiles={importFiles}
         />
       </footer>
+      </div>
 
       <SettingsDialog
         open={settingsOpen}
