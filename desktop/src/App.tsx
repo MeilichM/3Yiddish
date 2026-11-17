@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ChevronDown, FileAudio, LoaderCircle, Mic, Settings } from "lucide-react";
 import { Wordmark } from "@/components/brand";
@@ -42,6 +42,22 @@ function loadEntries(): Entry[] {
   }
 }
 
+/**
+ * What gives way in the top row when the window is too narrow for all of it, first to go
+ * first. The logo and the window buttons always stay.
+ */
+const GIVE_WAY = ["contribute", "compute", "settings", "theme", "model"];
+
+/** Show everything that fits in the row; hide the rest, in GIVE_WAY's order. */
+function fit(row: HTMLElement) {
+  const items = GIVE_WAY.map((key) => row.querySelector<HTMLElement>(`[data-give-way="${key}"]`));
+  for (const el of items) if (el) el.style.display = "";
+  for (const el of items) {
+    if (row.scrollWidth <= row.clientWidth) break;
+    if (el) el.style.display = "none";
+  }
+}
+
 /** Space starts a take unless the person is typing somewhere, or a dialog or menu is open. */
 function typing(target: EventTarget | null) {
   const el = target as HTMLElement | null;
@@ -73,6 +89,8 @@ export default function App() {
   const [sharing, setSharing] = useState(false);
   /** The chat's scroller, and the composer floating over its bottom. */
   const scroller = useRef<HTMLElement>(null);
+  /** The header's top row: what does not fit there gives way (see GIVE_WAY). */
+  const topRow = useRef<HTMLDivElement>(null);
   const floating = useRef<HTMLElement>(null);
   /** How tall the floating composer is: the chat leaves that much room under the last message. */
   const [under, setUnder] = useState(0);
@@ -178,6 +196,18 @@ export default function App() {
     const el = scroller.current;
     el?.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [entries.length, recording]);
+
+  // The top row refits when the window resizes, and after every render (buttons come and go).
+  useLayoutEffect(() => {
+    if (topRow.current) fit(topRow.current);
+  });
+  useEffect(() => {
+    const row = topRow.current;
+    if (!row) return;
+    const watch = new ResizeObserver(() => fit(row));
+    watch.observe(row);
+    return () => watch.disconnect();
+  }, []);
 
   useEffect(() => {
     const el = floating.current;
@@ -425,6 +455,7 @@ export default function App() {
         <Wordmark className="h-4" />
       </button>
       {status?.model && (
+        <span data-give-way="model" className="flex">
         <Tooltip>
           <TooltipTrigger asChild>
             <button
@@ -454,6 +485,7 @@ export default function App() {
                   : "Check for a newer model"}
           </TooltipContent>
         </Tooltip>
+        </span>
       )}
     </>
   );
@@ -472,16 +504,18 @@ export default function App() {
       */}
       <header data-tauri-drag-region className="shrink-0 border-b select-none">
         <div
+          ref={topRow}
           data-tauri-drag-region
           className={cn("flex h-[46px] items-center justify-end gap-1", windows ? "ps-4 pe-0" : mac ? "ps-3 pe-[9px]" : "ps-4 pe-[9px]")}
         >
           {!mac && (
-            <div data-tauri-drag-region className="me-auto flex items-center gap-3">
+            <div data-tauri-drag-region className="me-auto flex shrink-0 items-center gap-3">
               {brand}
             </div>
           )}
           {/* Contribute is always here; it says Contributing while the switch in Settings is on. */}
           {ready && (
+            <span data-give-way="contribute" className="flex shrink-0">
             <Button
               variant={view === "contribute" ? "secondary" : "ghost"}
               size="sm"
@@ -492,8 +526,10 @@ export default function App() {
             >
               {contributing ? "Contributing" : "Contribute"}
             </Button>
+            </span>
           )}
           {status && (
+            <span data-give-way="compute" className="flex shrink-0">
             <DropdownMenu>
               <Tooltip delayDuration={0}>
                 <TooltipTrigger asChild>
@@ -520,8 +556,12 @@ export default function App() {
                 </DropdownMenuRadioGroup>
               </DropdownMenuContent>
             </DropdownMenu>
+            </span>
           )}
-          <ThemeMenu />
+          <span data-give-way="theme" className="flex shrink-0">
+            <ThemeMenu />
+          </span>
+          <span data-give-way="settings" className="flex shrink-0">
           <Tooltip>
             <TooltipTrigger asChild>
               <Button size="icon" variant="ghost" className={ICON} onClick={() => setSettingsOpen(true)} aria-label="Settings">
@@ -530,6 +570,7 @@ export default function App() {
             </TooltipTrigger>
             <TooltipContent>Settings</TooltipContent>
           </Tooltip>
+          </span>
           {windows && <WindowControls />}
         </div>
         {mac && (

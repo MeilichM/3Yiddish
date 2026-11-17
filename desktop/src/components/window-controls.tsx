@@ -23,7 +23,7 @@ export function WindowControls() {
 
   const win = getCurrentWindow();
   return (
-    <div className="ms-2 flex h-full self-stretch">
+    <div className="ms-2 flex h-full shrink-0 self-stretch">
       <Control label="Minimize" glyph={"\uE921"} onClick={() => void win.minimize()} />
       <Control
         label={maximized ? "Restore" : "Maximize"}
