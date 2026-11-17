@@ -155,7 +155,6 @@ export default function App() {
       const s = await api.contributeSet(on);
       setContributing(on && (s.accepted || s.sharing));
       setSharing(s.sharing);
-      if (!on && view === "contribute") setView("chat");
     } catch (e) {
       toast.error(`Cannot save the setting: ${message(e)}`);
     }
@@ -456,7 +455,8 @@ export default function App() {
               {brand}
             </div>
           )}
-          {ready && contributing && (
+          {/* Contribute is always here; it says Contributing while the switch in Settings is on. */}
+          {ready && (
             <Button
               variant={view === "contribute" ? "secondary" : "ghost"}
               size="sm"
@@ -465,7 +465,7 @@ export default function App() {
               disabled={recording && view !== "contribute"}
               onClick={() => setView(view === "contribute" ? "chat" : "contribute")}
             >
-              Contributing
+              {contributing ? "Contributing" : "Contribute"}
             </Button>
           )}
           {status && (
@@ -547,7 +547,7 @@ export default function App() {
                 entry={entry}
                 onRetry={() => transcribe(entry)}
                 onRemove={() => remove(entry)}
-                onContribute={contributing ? () => contributeEntry(entry) : undefined}
+                onContribute={() => contributeEntry(entry)}
               />
             ))}
             <div ref={bottom} />

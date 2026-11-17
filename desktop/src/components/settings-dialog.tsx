@@ -152,8 +152,7 @@ export function SettingsDialog({
               <p className="px-1 text-xs leading-relaxed text-muted-foreground">
                 Off: nothing leaves your computer. On: what you transcribe from now on, the
                 recordings with their text and technical facts (no name), is sent to 3Yiddish to
-                test and improve Yiddish speech to text; nothing from before is sent. It also adds
-                Contribute at the top, for recording takes you check and send yourself.
+                test and improve Yiddish speech to text; nothing from before is sent.
               </p>
             </div>
           )}

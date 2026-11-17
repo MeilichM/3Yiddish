@@ -31,7 +31,7 @@ export function EntryView({
   entry: Entry;
   onRetry: () => void;
   onRemove: () => void;
-  /** Open this one in Contribute, to fix and send; only while Contribute is switched on. */
+  /** Open this one in Contribute, to fix and send (whether or not the Contribute switch is on). */
   onContribute?: () => void;
 }) {
   const [copied, setCopied] = useState(false);
