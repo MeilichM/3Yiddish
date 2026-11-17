@@ -829,8 +829,6 @@ fn terminal(
     terminal.clear()?;
     // Before mouse reporting starts, so nothing else arrives in the terminal's answers.
     init_graphics();
-    // Open the microphone ahead of time, so a take starts the instant it is asked for.
-    crate::audio::warm();
     crossterm::execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     // Background check for a newer app and model; never blocks the screen, silent offline.
     let check_tx = tx.clone();

@@ -15,7 +15,10 @@ mod native {
     use anyhow::{Context, Result, bail};
     use std::{
         path::Path,
-        sync::{Arc, Mutex, OnceLock},
+        sync::{
+            Arc, Mutex, OnceLock,
+            atomic::{AtomicBool, Ordering},
+        },
         time::{Duration, Instant},
     };
 
@@ -30,16 +33,18 @@ mod native {
     /// Playback can pause where it is and jump to another moment.
     pub const SEEKS: bool = true;
 
-    /// The microphone, opened once and kept open while the app runs, so a take starts the
-    /// instant it is asked for (opening a device takes from a blink to more than a second,
-    /// and whatever is said meanwhile would be lost). What it hears outside a take is thrown
-    /// away at once, but for the last moment, which becomes the start of the next take.
+    /// The microphone, open only while a take needs it: the first take opens it and the
+    /// last one to end closes it, so it is never on between takes (and the camera's or the
+    /// system's "in use" light goes out). Opening a device takes from a blink to about a
+    /// second, so a take can miss the very first moment; that is the price of not listening.
     struct Mic {
         tape: Mutex<Tape>,
         /// Set once the device is open: its sample rate and channels.
         format: OnceLock<(u32, u16)>,
         /// Why it could not be opened, or that it stopped working.
         failure: Mutex<Option<String>>,
+        /// No take uses it any more: its thread lets the device go.
+        closed: AtomicBool,
     }
 
     #[derive(Default)]
@@ -52,29 +57,31 @@ mod native {
         gap: Duration,
     }
 
-    static MIC: Mutex<Option<Arc<Mic>>> = Mutex::new(None);
+    /// The open microphone, and how many takes are using it.
+    static MIC: Mutex<Option<(Arc<Mic>, usize)>> = Mutex::new(None);
 
-    /// Open the microphone now, in the background, so the first take starts at once too.
-    /// Does nothing when it is already open (or opening).
-    pub fn warm() {
-        mic();
-    }
-
+    /// The microphone for one more take: the open one, or a newly opened one.
     fn mic() -> Arc<Mic> {
         let mut slot = MIC.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(mic) = slot.as_ref()
-            && mic.failure.lock().is_ok_and(|f| f.is_none())
+        if let Some((mic, users)) = slot.as_mut()
+            && mic.failed().is_none()
         {
+            *users += 1;
             return mic.clone();
+        }
+        // One that stopped working is let go.
+        if let Some((broken, _)) = slot.take() {
+            broken.closed.store(true, Ordering::SeqCst);
         }
         let mic = Arc::new(Mic {
             tape: Mutex::new(Tape::default()),
             format: OnceLock::new(),
             failure: Mutex::new(None),
+            closed: AtomicBool::new(false),
         });
-        *slot = Some(mic.clone());
+        *slot = Some((mic.clone(), 1));
         let own = mic.clone();
-        // The stream lives on its own thread for as long as it works.
+        // The stream lives on its own thread until no take needs it or it stops working.
         std::thread::spawn(move || {
             let fail = |why: String| {
                 if let Ok(mut failure) = own.failure.lock() {
@@ -84,14 +91,29 @@ mod native {
             match open_input(own.clone()) {
                 Ok((_stream, rate, channels)) => {
                     let _ = own.format.set((rate, channels));
-                    while own.failure.lock().is_ok_and(|f| f.is_none()) {
-                        std::thread::sleep(Duration::from_millis(200));
+                    while !own.closed.load(Ordering::SeqCst) && own.failed().is_none() {
+                        std::thread::sleep(Duration::from_millis(50));
                     }
                 }
                 Err(e) => fail(e.to_string()),
             }
         });
         mic
+    }
+
+    /// A take is done with the microphone: the last one closes it.
+    fn release(mic: &Arc<Mic>) {
+        let mut slot = MIC.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((open, users)) = slot.as_mut()
+            && Arc::ptr_eq(open, mic)
+        {
+            *users -= 1;
+            if *users > 0 {
+                return;
+            }
+            *slot = None;
+        }
+        mic.closed.store(true, Ordering::SeqCst);
     }
 
     impl Mic {
@@ -151,9 +173,8 @@ mod native {
             Ok(recorder)
         }
 
-        /// Start recording at once, never waiting for the device. With the microphone
-        /// already open (see `warm`) the take begins a moment before now, so not even the
-        /// first sound is lost. Ask `failed()` later.
+        /// Start recording at once, never waiting for the device: it opens in the
+        /// background and the take begins once it is on. Ask `failed()` later.
         pub fn start_now() -> Self {
             let mic = mic();
             let cold = mic.format.get().is_none();
@@ -258,6 +279,7 @@ mod native {
                 tape.keeping = false;
                 tape.data.clear();
             }
+            release(&self.mic);
         }
     }
 
@@ -568,9 +590,6 @@ mod termux {
         }
     }
 
-    /// Nothing to open ahead of time: the phone's recorder starts when asked.
-    pub fn warm() {}
-
     pub struct Recorder {
         path: PathBuf,
         started: Instant,
@@ -753,13 +772,13 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(700));
         for _ in 0..3 {
             let at = std::time::Instant::now();
-            let warm = super::Recorder::start_now();
+            let take = super::Recorder::start_now();
             let began = at.elapsed();
             std::thread::sleep(std::time::Duration::from_millis(1000));
             let at = std::time::Instant::now();
-            let pcm = warm.stop().unwrap();
+            let pcm = take.stop().unwrap();
             println!(
-                "warm take: start took {began:?}, stop took {:?}, {:.2} s of sound for 1.00 s held",
+                "take: start took {began:?}, stop took {:?}, {:.2} s of sound for 1.00 s held",
                 at.elapsed(),
                 pcm.len() as f32 / 16_000.0
             );
