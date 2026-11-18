@@ -994,9 +994,11 @@ fn terminal(
             // A model put here by hand is not replaced by the published one.
             None
         } else {
-            crate::model::latest_version()
+            // Any published model that is not on disk yet, whichever one is in use.
+            crate::model::wanted(&crate::paths::models())
                 .ok()
-                .filter(|v| have.as_ref() != Some(v))
+                .filter(|wanted| *wanted)
+                .map(|_| "new".to_owned())
         };
         let _ = check_tx.send(Update::Available(app, model));
     });
@@ -1116,6 +1118,8 @@ fn terminal(
                     if finished {
                         state.upgrading = false;
                         state.restart_due |= state.notice.starts_with("Updated to");
+                        // A second model may have arrived: its switch button shows at once.
+                        state.model_switch = model_switch_label();
                     }
                 }
                 Update::Play(answer) => playground::answer(&mut state, answer, &play_jobs),
@@ -1678,7 +1682,7 @@ fn click(
         Click::SwitchModel => {
             match crate::model::switch_next(&crate::paths::models()) {
                 Ok((_, label)) => {
-                    state.notice = format!("Now using the {label} model.");
+                    state.notice = format!("Now using our {label}-based model.");
                     state.model_switch = model_switch_label();
                 }
                 Err(e) => state.notice = crate::model::plain_error(&e),

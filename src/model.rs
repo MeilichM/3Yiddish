@@ -1,7 +1,9 @@
-//! The Transcribe model store. GitHub hosts exactly one model, the latest, under the release
-//! tag `model-latest`; `model.json` there names its version, files, sizes and SHA-256 sums.
-//! Locally: models/<version>/ holds the files, models/current names the active version and
-//! models/previous the one before it (kept for an instant rollback).
+//! The Transcribe model store. GitHub hosts the published models under the release tag
+//! `model-latest`: `model.json` there is the main model (version, files, sizes, SHA-256 sums)
+//! and names, in `also`, the same kind of file for each further model.
+//! Locally: models/<version>/ holds the files, models/current names the active version,
+//! models/previous the one before it (kept for an instant rollback) and models/index the
+//! versions that were published at the last download (kept, and offered for switching).
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -40,6 +42,9 @@ pub struct Manifest {
     /// The name shown in the app.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// In the published main model only: the files (beside it) that describe further models.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also: Vec<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct File {
@@ -109,14 +114,43 @@ fn manifest_of(dir: &Path) -> Option<Manifest> {
     serde_json::from_slice(&std::fs::read(dir.join("model.json")).ok()?).ok()
 }
 
-/// Every model on disk that can be run: (version, the name to show), in a fixed order.
+/// Can this build run the model? The Omnilingual engine is not in every build.
+fn runs_here(manifest: &Manifest) -> bool {
+    match manifest.engine.as_deref() {
+        None => true,
+        Some("omnilingual") => cfg!(feature = "omni"),
+        Some(_) => false,
+    }
+}
+
+/// The versions that were published at the last download; none before the first one.
+fn listed(root: &Path) -> Vec<String> {
+    std::fs::read_to_string(root.join("index"))
+        .map(|text| text.split_whitespace().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+/// Every model on disk that can be run and switched to: (version, the name to show), in a
+/// fixed order. Once a download has said what is published, an older model kept only for
+/// rolling back is not among them.
 pub fn installed(root: &Path) -> Vec<(String, String)> {
+    let listed = listed(root);
+    let now = std::fs::read_to_string(root.join("current")).unwrap_or_default();
     let mut found: Vec<(String, String)> = std::fs::read_dir(root)
         .into_iter()
         .flatten()
         .flatten()
         .filter_map(|entry| {
             let manifest = manifest_of(&entry.path())?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !runs_here(&manifest)
+                || !(listed.is_empty()
+                    || manifest.local
+                    || name == now.trim()
+                    || listed.contains(&name))
+            {
+                return None;
+            }
             let model = manifest.files.iter().find(|f| f.role == "transcribe")?;
             entry.path().join(&model.name).is_file().then(|| {
                 let label = manifest.label.unwrap_or_else(|| manifest.version.clone());
@@ -188,60 +222,128 @@ pub fn plain_error(error: &anyhow::Error) -> String {
     }
 }
 
-/// The version the GitHub model index currently names.
-pub fn latest_version() -> Result<String> {
-    let manifest: Manifest = serde_json::from_reader(http_get(&index_url())?.take(1024 * 1024))?;
-    Ok(manifest.version)
-}
-
-/// Check GitHub for a newer model; download, verify and activate it. Returns the version now
-/// active. `progress` gets (file name, bytes done, bytes total).
-pub fn pull(root: &Path, progress: &mut dyn FnMut(&str, u64, u64)) -> Result<String> {
+/// The published models this build can run: where their files are, and the main one first.
+fn published() -> Result<(String, Vec<Manifest>)> {
     let index = index_url();
-    let manifest: Manifest = serde_json::from_reader(http_get(&index)?.take(1024 * 1024))
-        .context("The model index is not valid")?;
-    if !safe_name(&manifest.version) || manifest.files.iter().any(|f| !safe_name(&f.name)) {
-        bail!("The model index has unsafe names");
-    }
-    if let Some(min) = &manifest.min_app_version
-        && version_newer(env!("CARGO_PKG_VERSION"), min)
-    {
-        bail!("This model needs 3Yiddish {min} or newer; run `3yiddish update` first");
-    }
-    if current(root).is_some_and(|(v, ..)| v == manifest.version) {
-        return Ok(manifest.version);
-    }
     let base = index
         .rsplit_once('/')
         .map_or(index.as_str(), |(b, _)| b)
         .to_owned();
-    let dir = root.join(&manifest.version);
-    std::fs::create_dir_all(&dir)?;
-    for f in &manifest.files {
-        let target = dir.join(&f.name);
-        if target.is_file() && sha256_file(&target)? == f.sha256 {
-            continue;
+    let read = |url: &str| -> Result<Manifest> {
+        serde_json::from_reader(http_get(url)?.take(1024 * 1024))
+            .context("The model index is not valid")
+    };
+    let main = read(&index)?;
+    let mut all = Vec::new();
+    for name in &main.also {
+        if !safe_name(name) {
+            bail!("The model index has unsafe names");
         }
-        let part = dir.join(format!("{}.part", f.name));
-        download(&format!("{base}/{}", f.name), &part, f.size, &mut |done| {
-            progress(&f.name, done, f.size)
-        })?;
-        let got = sha256_file(&part)?;
-        if got != f.sha256 {
-            let _ = std::fs::remove_file(&part);
-            bail!("{} failed its checksum; try again", f.name);
-        }
-        std::fs::rename(&part, &target)?;
+        all.push(read(&format!("{base}/{name}"))?);
     }
-    std::fs::write(
-        dir.join("model.json"),
-        serde_json::to_vec_pretty(&manifest)?,
-    )?;
-    activate(root, &manifest.version)?;
-    Ok(manifest.version)
+    all.insert(0, main);
+    all.retain(runs_here);
+    Ok((base, all))
 }
 
-/// Point `current` at a version, keep the old one as `previous`, delete anything older.
+/// Are all of the model's files on disk, at their full size?
+fn complete(root: &Path, manifest: &Manifest) -> bool {
+    let dir = root.join(&manifest.version);
+    dir.join("model.json").is_file()
+        && manifest.files.iter().all(|f| {
+            std::fs::metadata(dir.join(&f.name)).is_ok_and(|m| m.is_file() && m.len() == f.size)
+        })
+}
+
+/// Is there a published model this build can run that is not on disk yet? The model in use
+/// does not decide it: someone using the second model has nothing to get.
+pub fn wanted(root: &Path) -> Result<bool> {
+    Ok(published()?.1.iter().any(|m| !complete(root, m)))
+}
+
+/// Check GitHub for published models that are not here; download and verify them. A new
+/// main model becomes the active one, except for someone using a model that is still
+/// published (it stays) or one of another kind that has its own newer version (that one
+/// takes over). Returns the version now active. `progress` gets (file name, bytes done,
+/// bytes total).
+pub fn pull(root: &Path, progress: &mut dyn FnMut(&str, u64, u64)) -> Result<String> {
+    let (base, all) = published()?;
+    install(
+        root,
+        &all,
+        &mut |file, part, progress| {
+            download(&format!("{base}/{}", file.name), part, file.size, progress)
+        },
+        progress,
+    )
+}
+
+/// Gets one file of a model into the given place, reporting the bytes done.
+type Fetch<'a> = &'a mut dyn FnMut(&File, &Path, &mut dyn FnMut(u64)) -> Result<()>;
+
+/// Put the published models `all` (main one first) on disk, getting each file with `fetch`.
+fn install(
+    root: &Path,
+    all: &[Manifest],
+    fetch: Fetch,
+    progress: &mut dyn FnMut(&str, u64, u64),
+) -> Result<String> {
+    let main = all.first().context("The model index names no model")?;
+    for manifest in all {
+        if !safe_name(&manifest.version) || manifest.files.iter().any(|f| !safe_name(&f.name)) {
+            bail!("The model index has unsafe names");
+        }
+        if let Some(min) = &manifest.min_app_version
+            && version_newer(env!("CARGO_PKG_VERSION"), min)
+        {
+            bail!("This model needs 3Yiddish {min} or newer; run `3yiddish update` first");
+        }
+    }
+    std::fs::create_dir_all(root)?;
+    let versions: Vec<&str> = all.iter().map(|m| m.version.as_str()).collect();
+    write_atomic(&root.join("index"), &versions.join("\n"))?;
+    for manifest in all {
+        let dir = root.join(&manifest.version);
+        if !complete(root, manifest) {
+            std::fs::create_dir_all(&dir)?;
+            for f in &manifest.files {
+                let target = dir.join(&f.name);
+                if target.is_file() && sha256_file(&target)? == f.sha256 {
+                    continue;
+                }
+                let part = dir.join(format!("{}.part", f.name));
+                fetch(f, &part, &mut |done| progress(&f.name, done, f.size))?;
+                let got = sha256_file(&part)?;
+                if got != f.sha256 {
+                    let _ = std::fs::remove_file(&part);
+                    bail!("{} failed its checksum; try again", f.name);
+                }
+                std::fs::rename(&part, &target)?;
+            }
+            std::fs::write(dir.join("model.json"), serde_json::to_vec_pretty(manifest)?)?;
+        }
+        // The first model is usable (and active) before the next download starts.
+        let now = current(root).map(|(v, ..)| v);
+        let takes_over = match &now {
+            None => true,
+            Some(v) if versions.contains(&v.as_str()) => false,
+            Some(v) => {
+                let kind = manifest_of(&root.join(v)).and_then(|m| m.engine);
+                manifest.engine == kind
+                    || (manifest.version == main.version && !all.iter().any(|m| m.engine == kind))
+            }
+        };
+        if takes_over {
+            activate(root, &manifest.version)?;
+        }
+    }
+    tidy(root);
+    current(root)
+        .map(|(v, ..)| v)
+        .context("The model did not install")
+}
+
+/// Point `current` at a version, keep the old one as `previous`, delete what is left over.
 fn activate(root: &Path, version: &str) -> Result<()> {
     let old = std::fs::read_to_string(root.join("current"))
         .ok()
@@ -250,16 +352,28 @@ fn activate(root: &Path, version: &str) -> Result<()> {
         write_atomic(&root.join("previous"), old)?;
     }
     write_atomic(&root.join("current"), version)?;
-    let keep = [Some(version.to_owned()), old];
-    for entry in std::fs::read_dir(root)?.flatten() {
+    tidy(root);
+    Ok(())
+}
+
+/// Delete the models nobody needs: not the active one, not the one before it, not one that
+/// is published, and never one put here by hand.
+fn tidy(root: &Path) {
+    let read = |name: &str| {
+        std::fs::read_to_string(root.join(name))
+            .ok()
+            .map(|s| s.trim().to_owned())
+    };
+    let mut keep = listed(root);
+    keep.extend(read("current"));
+    keep.extend(read("previous"));
+    for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        // A model put here by hand is never cleared away.
         let local = manifest_of(&entry.path()).is_some_and(|m| m.local);
-        if entry.path().is_dir() && !local && !keep.iter().flatten().any(|k| *k == name) {
+        if entry.path().is_dir() && !local && !keep.contains(&name) {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
-    Ok(())
 }
 
 /// Swap back to the previous model.
@@ -386,6 +500,7 @@ mod tests {
                 engine: None,
                 local: false,
                 label: None,
+                also: vec![],
             };
             std::fs::write(
                 dir.join("model.json"),
@@ -414,6 +529,92 @@ mod tests {
         assert!(root.join("3").exists() && !current_is_local(&root));
         assert!(safe_name("ggml-q5_0.bin") && !safe_name("../x") && !safe_name(".hidden"));
         assert!(version_newer("0.1.0", "0.2.0") && !version_newer("0.2.0", "0.1.9"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A published model whose one file holds its own name.
+    fn published_model(version: &str, engine: Option<&str>) -> Manifest {
+        let sum = Sha256::digest(version.as_bytes());
+        Manifest {
+            version: version.into(),
+            files: vec![File {
+                role: "transcribe".into(),
+                name: format!("{version}.bin"),
+                size: version.len() as u64,
+                sha256: sum.iter().map(|b| format!("{b:02x}")).collect(),
+            }],
+            min_app_version: None,
+            scores: serde_json::Value::Null,
+            plain_text: false,
+            word_check: None,
+            loop_guard: false,
+            engine: engine.map(str::to_owned),
+            local: false,
+            label: None,
+            also: vec![],
+        }
+    }
+
+    /// Install `all`; returns the active version and how many files were downloaded.
+    fn get(root: &Path, all: &[Manifest]) -> (String, usize) {
+        let mut fetched = 0;
+        let active = install(
+            root,
+            all,
+            &mut |file, part, _| {
+                fetched += 1;
+                Ok(std::fs::write(part, file.name.trim_end_matches(".bin"))?)
+            },
+            &mut |_, _, _| {},
+        )
+        .unwrap();
+        (active, fetched)
+    }
+
+    #[test]
+    fn two_published_models_live_side_by_side() {
+        let root = std::env::temp_dir().join(format!("3y-models-{}", uuid::Uuid::new_v4()));
+        let omni = Some("omnilingual");
+        // Someone with the one old model: the new main model takes over, the second comes too.
+        let old = published_model("old", None);
+        assert_eq!(get(&root, std::slice::from_ref(&old)), ("old".into(), 1));
+        let first = [published_model("w1", None), published_model("o1", omni)];
+        assert_eq!(get(&root, &first), ("w1".into(), 2));
+        assert!(root.join("o1/o1.bin").is_file() && root.join("old").is_dir());
+        // The old one is kept for rolling back, but is not one of the models to switch to.
+        let shown = if cfg!(feature = "omni") { 2 } else { 1 };
+        assert_eq!(installed(&root).len(), shown);
+        assert!(installed(&root).iter().all(|(v, _)| v != "old"));
+        // Nothing to get, and whoever uses the second model stays on it.
+        write_atomic(&root.join("current"), "o1").unwrap();
+        assert_eq!(get(&root, &first), ("o1".into(), 0));
+        assert!(root.join("w1/w1.bin").is_file());
+        // A file that went missing is fetched again without changing the model in use.
+        std::fs::remove_file(root.join("w1/w1.bin")).unwrap();
+        assert_eq!(get(&root, &first), ("o1".into(), 1));
+        // New versions of both: the second model's user moves to its new version.
+        let second = [published_model("w2", None), published_model("o2", omni)];
+        assert_eq!(get(&root, &second), ("o2".into(), 2));
+        assert!(root.join("w2").is_dir() && root.join("o1").is_dir());
+        assert!(!root.join("w1").exists() && !root.join("old").exists());
+        // Rolling back keeps everything that is published.
+        assert_eq!(rollback(&root).unwrap(), "o1");
+        assert!(root.join("w2").is_dir() && root.join("o2").is_dir());
+        // A main model alone again: the second model's user moves to it.
+        let third = [published_model("w3", None)];
+        assert_eq!(get(&root, &third), ("w3".into(), 1));
+        // A first install: the main model is the active one.
+        let fresh = root.join("fresh");
+        assert_eq!(get(&fresh, &second), ("w2".into(), 2));
+        // A file that does not match its checksum is refused and nothing is activated.
+        let empty = root.join("empty");
+        let result = install(
+            &empty,
+            &third,
+            &mut |_, part, _| Ok(std::fs::write(part, "something else")?),
+            &mut |_, _, _| {},
+        );
+        assert!(result.is_err() && current(&empty).is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

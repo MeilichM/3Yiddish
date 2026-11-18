@@ -264,3 +264,47 @@ mod tests {
         assert!((n[0] + 1.0).abs() < 1e-4 && (n[1] - 1.0).abs() < 1e-4);
     }
 }
+
+/// The runtime this engine comes with was built against a newer C library than the oldest
+/// Linux systems the app runs on, and asks for three number-reading functions by their new
+/// names. A release build for Linux answers those names itself, with the same functions
+/// under the names every system has, so the file starts on the older systems too.
+#[cfg(all(feature = "old-linux", target_os = "linux"))]
+mod old_linux {
+    use std::ffi::{c_char, c_int, c_long, c_longlong, c_ulonglong};
+    unsafe extern "C" {
+        fn strtol(s: *const c_char, end: *mut *mut c_char, base: c_int) -> c_long;
+        fn strtoll(s: *const c_char, end: *mut *mut c_char, base: c_int) -> c_longlong;
+        fn strtoull(s: *const c_char, end: *mut *mut c_char, base: c_int) -> c_ulonglong;
+    }
+    /// # Safety
+    /// As for C's `strtol`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __isoc23_strtol(
+        s: *const c_char,
+        end: *mut *mut c_char,
+        base: c_int,
+    ) -> c_long {
+        unsafe { strtol(s, end, base) }
+    }
+    /// # Safety
+    /// As for C's `strtoll`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __isoc23_strtoll(
+        s: *const c_char,
+        end: *mut *mut c_char,
+        base: c_int,
+    ) -> c_longlong {
+        unsafe { strtoll(s, end, base) }
+    }
+    /// # Safety
+    /// As for C's `strtoull`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __isoc23_strtoull(
+        s: *const c_char,
+        end: *mut *mut c_char,
+        base: c_int,
+    ) -> c_ulonglong {
+        unsafe { strtoull(s, end, base) }
+    }
+}

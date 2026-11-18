@@ -1,10 +1,17 @@
 3Yiddish
 Copyright (c) 2026 TripleU613. Licensed under CC BY-NC-SA 4.0 (see LICENSE).
 
-The Transcribe model is a fine-tune of third-party models whose licenses
-require these notices to accompany it:
+The Transcribe models are fine-tunes of third-party models whose licenses
+require these notices to accompany them:
 
-- OpenAI Whisper large-v3-turbo, MIT License, Copyright (c) 2022 OpenAI.
-  See licenses/whisper-MIT.txt.
-- ivrit-ai/yi-whisper-large-v3-turbo, Apache License 2.0, by ivrit.ai.
-  See licenses/ivrit-ai-Apache-2.0.txt.
+- The Whisper-based model: OpenAI Whisper large-v3-turbo, MIT License,
+  Copyright (c) 2022 OpenAI. See licenses/whisper-MIT.txt.
+- The Omnilingual-based model: Meta Omnilingual ASR (CTC 1B v2), Apache
+  License 2.0, Copyright 2025 (c) Meta Platforms, Inc. and affiliates.
+  See licenses/omnilingual-asr-Apache-2.0.txt.
+- The earlier model (versions up to 2026.11.11): OpenAI Whisper
+  large-v3-turbo as above, and ivrit-ai/yi-whisper-large-v3-turbo, Apache
+  License 2.0, by ivrit.ai. See licenses/ivrit-ai-Apache-2.0.txt.
+
+The app runs the Omnilingual-based model with ONNX Runtime, MIT License,
+Copyright (c) Microsoft Corporation. See licenses/onnxruntime-MIT.txt.

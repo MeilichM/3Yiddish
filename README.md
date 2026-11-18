@@ -23,8 +23,15 @@ curl -fsSL https://github.com/TripleU613/3Yiddish/releases/latest/download/insta
 irm https://github.com/TripleU613/3Yiddish/releases/latest/download/install.ps1 | iex
 ```
 
-That's it. It downloads itself, checks it isn't broken, and grabs the speech model
-(~600 MB, one time; go make a coffee).
+That's it. It downloads itself, checks it isn't broken, and grabs the speech models
+(about 1.6 GB for the two of them, one time; go make a coffee). On a phone or an Intel Mac
+it is one model, about 600 MB.
+
+**Two models, one button.** Both are our own, trained on heimish Yiddish: one built on
+OpenAI's Whisper, one built on Meta's Omnilingual. They make different mistakes, so if one
+gets a recording wrong, click the model button at the top and try the other. The
+Whisper-based one is the default and can use a graphics card; the Omnilingual-based one
+runs on the processor.
 
 Got a graphics card? The installer notices and gives you the GPU build, which is about ten
 times faster. A little GPU/CPU button on top shows which one is running; click it to switch.
@@ -66,7 +73,8 @@ One more thing:
 ## Updates? Automatic-ish
 
 When there's a new version or a smarter model, the Refresh button turns into an arrow. Click it. Done.
-New models only ship after they beat the old one on our test, so they only get better.
+Every model is run on our test before it ships, and the numbers go in the
+[benchmark](BENCHMARK.md), good or bad.
 Don't like the new one? `3yiddish model rollback`.
 
 ## Help it get better

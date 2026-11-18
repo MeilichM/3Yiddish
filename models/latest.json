@@ -1,11 +1,11 @@
 {
- "version": "2026.11.11",
+ "version": "2026.11.18",
  "files": [
   {
    "role": "transcribe",
-   "name": "transcribe-2026.11.11.bin",
+   "name": "transcribe-2026.11.18.bin",
    "size": 574041195,
-   "sha256": "5da64e8963b955a3b0c88eb0638a5cce8112b3edd6d6cd7f8a6c208a2d42c03e"
+   "sha256": "bc84a3db13deba10b3d677779a208f7aaa16b058b38edd858e3286b1cc68aedb"
   },
   {
    "role": "vad",
@@ -14,8 +14,16 @@
    "sha256": "29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf"
   }
  ],
+ "min_app_version": "0.4.0",
  "scores": {
-  "playground": 94.7
+  "wrong_words_per_100": 11.9,
+  "benchmark_score": 60.3
  },
- "format": "ggml-q5_k"
+ "plain_text": true,
+ "loop_guard": true,
+ "label": "Whisper",
+ "also": [
+  "omni.json"
+ ],
+ "format": "ggml-q5_0"
 }

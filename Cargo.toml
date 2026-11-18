@@ -1,7 +1,7 @@
 [package]
 name = "three-yiddish"
 default-run = "3yiddish"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 publish = false
 license = "CC-BY-NC-SA-4.0"
@@ -51,6 +51,9 @@ lto = "thin"
 vulkan = ["whisper-rs/vulkan"]
 # The second Transcribe engine (Meta Omnilingual through ONNX Runtime); desktop builds only.
 omni = ["dep:ort"]
+# Release builds for Linux: the Omnilingual engine on systems older than its runtime was
+# built for (see `old_linux` in src/omni.rs and release.yml).
+old-linux = ["omni"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { version = "0.16", features = ["metal"] }
