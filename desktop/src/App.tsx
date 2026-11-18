@@ -511,7 +511,7 @@ export default function App() {
                     : "Speech model"}
             </TooltipContent>
           </Tooltip>
-          <DropdownMenuContent align="start" className="min-w-44">
+          <DropdownMenuContent align="start" className="w-auto min-w-44 whitespace-nowrap">
             {status.models.length > 1 && (
               <>
                 <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">Speech model</DropdownMenuLabel>
