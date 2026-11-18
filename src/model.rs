@@ -21,10 +21,30 @@ pub struct Manifest {
     pub min_app_version: Option<String>,
     #[serde(default)]
     pub scores: serde_json::Value,
+    /// The model was trained to write plain text, without time marks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plain_text: bool,
+    /// How hard the word check pushes towards the words in the "words" file; absent: off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub word_check: Option<f32>,
+    /// Stop a phrase from being written a third time in a row.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub loop_guard: bool,
+    /// The kind of model: absent for Whisper (a ggml file), "omnilingual" for an Omnilingual
+    /// one (an ONNX file, with its letter table under the role "letters").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    /// A model put here by hand: the check for a newer published model leaves it alone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local: bool,
+    /// The name shown in the app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct File {
-    /// Role: "transcribe" (whisper.cpp ggml model) or "vad" (Silero VAD).
+    /// Role: "transcribe" (whisper.cpp ggml model), "vad" (Silero VAD) or "words" (the word
+    /// list for the word check, one word per line).
     pub role: String,
     pub name: String,
     pub size: u64,
@@ -53,6 +73,85 @@ pub fn current(root: &Path) -> Option<(String, PathBuf, Option<PathBuf>)> {
     };
     let model = path("transcribe").filter(|p| p.is_file())?;
     Some((version, model, path("vad").filter(|p| p.is_file())))
+}
+
+/// How the model in this file wants to be run: what the `model.json` beside it says. A model
+/// file on its own (no `model.json`) runs with the plain settings.
+pub fn settings(model: &Path) -> crate::asr::Settings {
+    let Some(dir) = model.parent() else {
+        return Default::default();
+    };
+    let Some(manifest) = std::fs::read(dir.join("model.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok())
+    else {
+        return Default::default();
+    };
+    let file = |role: &str| {
+        manifest
+            .files
+            .iter()
+            .find(|f| f.role == role)
+            .map(|f| dir.join(&f.name))
+            .filter(|p| p.is_file())
+    };
+    crate::asr::Settings {
+        plain_text: manifest.plain_text,
+        word_weight: manifest.word_check.unwrap_or(0.0),
+        words: file("words"),
+        loop_guard: manifest.loop_guard,
+        omnilingual: manifest.engine.as_deref() == Some("omnilingual"),
+        letters: file("letters"),
+    }
+}
+
+fn manifest_of(dir: &Path) -> Option<Manifest> {
+    serde_json::from_slice(&std::fs::read(dir.join("model.json")).ok()?).ok()
+}
+
+/// Every model on disk that can be run: (version, the name to show), in a fixed order.
+pub fn installed(root: &Path) -> Vec<(String, String)> {
+    let mut found: Vec<(String, String)> = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let manifest = manifest_of(&entry.path())?;
+            let model = manifest.files.iter().find(|f| f.role == "transcribe")?;
+            entry.path().join(&model.name).is_file().then(|| {
+                let label = manifest.label.unwrap_or_else(|| manifest.version.clone());
+                (entry.file_name().to_string_lossy().into_owned(), label)
+            })
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// Whether the active model was put here by hand (not the published one).
+pub fn current_is_local(root: &Path) -> bool {
+    current(root)
+        .and_then(|(version, ..)| manifest_of(&root.join(version)))
+        .is_some_and(|m| m.local)
+}
+
+/// Make the next installed model the active one; returns its (version, name). Nothing is
+/// deleted. With one model installed it stays as it is.
+pub fn switch_next(root: &Path) -> Result<(String, String)> {
+    let all = installed(root);
+    let now = current(root).map(|(v, ..)| v);
+    let at = all.iter().position(|(v, _)| Some(v) == now.as_ref());
+    let next = all
+        .get(at.map_or(0, |i| (i + 1) % all.len().max(1)))
+        .context("No model installed")?
+        .clone();
+    if Some(&next.0) != now.as_ref() {
+        if let Some(old) = now {
+            write_atomic(&root.join("previous"), &old)?;
+        }
+        write_atomic(&root.join("current"), &next.0)?;
+    }
+    Ok(next)
 }
 
 fn safe_name(name: &str) -> bool {
@@ -154,7 +253,9 @@ fn activate(root: &Path, version: &str) -> Result<()> {
     let keep = [Some(version.to_owned()), old];
     for entry in std::fs::read_dir(root)?.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if entry.path().is_dir() && !keep.iter().flatten().any(|k| *k == name) {
+        // A model put here by hand is never cleared away.
+        let local = manifest_of(&entry.path()).is_some_and(|m| m.local);
+        if entry.path().is_dir() && !local && !keep.iter().flatten().any(|k| *k == name) {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
@@ -279,6 +380,12 @@ mod tests {
                 }],
                 min_app_version: None,
                 scores: serde_json::Value::Null,
+                plain_text: v == "3",
+                word_check: (v == "3").then_some(2.5),
+                loop_guard: v == "3",
+                engine: None,
+                local: false,
+                label: None,
             };
             std::fs::write(
                 dir.join("model.json"),
@@ -288,12 +395,23 @@ mod tests {
             activate(&root, v).unwrap();
         }
         assert_eq!(current(&root).unwrap().0, "3");
+        // Each model carries its own way of being run; an older one has none.
+        let new = settings(&root.join("3").join("m.bin"));
+        assert!(new.plain_text && new.loop_guard && new.word_weight == 2.5);
+        assert!(new.words.is_none(), "no word list file was shipped");
+        let old = settings(&root.join("2").join("m.bin"));
+        assert!(!old.plain_text && !old.loop_guard && old.word_weight == 0.0);
         assert!(
             !root.join("1").exists(),
             "only current and previous are kept"
         );
         assert_eq!(rollback(&root).unwrap(), "2");
         assert_eq!(current(&root).unwrap().0, "2");
+        // Switching walks through what is installed and back, deleting nothing.
+        assert_eq!(installed(&root).len(), 2);
+        assert_eq!(switch_next(&root).unwrap().0, "3");
+        assert_eq!(switch_next(&root).unwrap().0, "2");
+        assert!(root.join("3").exists() && !current_is_local(&root));
         assert!(safe_name("ggml-q5_0.bin") && !safe_name("../x") && !safe_name(".hidden"));
         assert!(version_newer("0.1.0", "0.2.0") && !version_newer("0.2.0", "0.1.9"));
         std::fs::remove_dir_all(root).unwrap();

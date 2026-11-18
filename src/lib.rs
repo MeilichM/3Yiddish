@@ -8,9 +8,12 @@ pub mod font;
 pub mod freebench;
 pub mod knowledge;
 pub mod model;
+#[cfg(feature = "omni")]
+pub mod omni;
 pub mod paths;
 pub mod phone;
 pub mod service;
 pub mod share;
 pub mod tui;
 pub mod update;
+pub mod wordcheck;

@@ -71,7 +71,7 @@ Don't like the new one? `3yiddish model rollback`.
 
 ## Help it get better
 
-Want to help? Click **CONTRIBUTE**. Say a few things in your own words, fix the words the
+Want to help? Click the heart at the top. Say a few things in your own words, fix the words the
 app got wrong, and press **Send**. No account, no setup; any name will do. Real voices with
 real corrections are how the test gets honest and the model gets better.
 
@@ -83,7 +83,7 @@ Yes. It all runs on your computer, and your voice stays there unless you say oth
 
 - The first time you open the app it asks whether to share what you transcribe. The
   answer is **No** unless you pick Yes.
-- **CONTRIBUTE** tells you what it sends before you accept, and accepting it turns
+- **Contribute** (the heart) tells you what it sends before you accept, and accepting it turns
   sharing on too.
 - Changed your mind? Click **Sharing** at the top, or run `3yiddish share off`. That
   also deletes anything still waiting to be sent.
