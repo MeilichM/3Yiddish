@@ -19,7 +19,10 @@ jobs:
       - run: cargo test --locked
       - if: runner.os == 'Linux'
         name: Installer syntax (sh)
-        run: sh -n install/install.sh
+        run: |
+          sh -n install/install.sh
+          # macOS /bin/sh (bash 3.2) reads non-ASCII bytes after $var as part of its name.
+          if LC_ALL=C grep -n '[^ -~]' install/install.sh | grep -v '^[0-9]*:\s*#'; then echo 'install.sh: non-ASCII outside comments'; exit 1; fi
       - if: runner.os == 'Windows'
         name: Installer syntax (Windows PowerShell)
         shell: powershell
