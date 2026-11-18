@@ -663,7 +663,7 @@ impl App {
         let endpoint = self.config.transcribe.as_ref().ok_or_else(|| {
             Error(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "No Transcribe model yet: click Get model in the app, or run `3yiddish model pull`"
+                "No Transcribe model yet: click the arrow at the top of the app, or run `3yiddish model pull`"
                     .into(),
             )
         })?;

@@ -234,6 +234,8 @@ struct Screen {
     /// Termux with the phone's own font: offer the font in which Yiddish letters read well.
     font_offer: bool,
     upgrading: bool,
+    /// A new version was just put in place: the refresh button is for starting it.
+    restart_due: bool,
     /// The playground is switched on here (`3yiddish playground on`): Pair phone shows.
     playground: bool,
     /// The phone pairing as the service last told it.
@@ -251,7 +253,7 @@ struct Screen {
     recording_path: Option<PathBuf>,
     /// The playground's screens (where it is switched on).
     play: playground::Play,
-    /// Sharing is on here: the Sharing chip shows in the top bar.
+    /// Sharing is on here: the heart in the top bar is full, and Contribute can stop it.
     sharing: bool,
     /// The sharing card is showing: the first-run question, or the chip's card.
     share_card: Option<ShareCard>,
@@ -681,6 +683,26 @@ async fn chat(
         .context("No reply")?;
     Ok(json!({"text": reply}))
 }
+/// What there is to get, most needed first, with the words the bar shows for it: the first
+/// model (nothing works without it), a new version of the app, a newer model, the font.
+/// Nothing while one is on its way, or once a new version waits for Refresh to start it.
+fn offer(state: &Screen) -> Option<(Click, &'static str)> {
+    if state.upgrading || state.restart_due {
+        return None;
+    }
+    let model = state.model_update.as_deref();
+    if model == Some("first") {
+        Some((Click::UpdateModel, "Click the arrow to get the model."))
+    } else if state.app_update.is_some() {
+        Some((Click::UpdateApp, "New version: click the arrow."))
+    } else if model.is_some() {
+        Some((Click::UpdateModel, "New model: click the arrow."))
+    } else if state.font_offer {
+        Some((Click::GetFont, "Click the arrow for a better font."))
+    } else {
+        None
+    }
+}
 /// Does the service have a chat model set up? Only then is there a Chat button.
 fn chat_offered(state: &Screen) -> bool {
     state.status.as_ref().is_some_and(|s| {
@@ -1093,6 +1115,7 @@ fn terminal(
                     state.notice_since = None;
                     if finished {
                         state.upgrading = false;
+                        state.restart_due |= state.notice.starts_with("Updated to");
                     }
                 }
                 Update::Play(answer) => playground::answer(&mut state, answer, &play_jobs),
@@ -1724,7 +1747,7 @@ fn plain_alert(error: &str) -> String {
         None => error,
     };
     if said.starts_with("No Transcribe model yet") {
-        "No model yet: use Get model first.".into()
+        "No model yet: click the arrow at the top first.".into()
     } else if said.starts_with("Model endpoint could not be reached")
         || said.starts_with("Translation worker is unreachable")
     {
@@ -2212,7 +2235,7 @@ fn nerd_font() -> bool {
     }
 }
 /// What `nerd_font` found: 0 not asked yet, 1 no, 2 yes. Set back to 0 when the font changes
-/// under the app ("Get font"), so the next frame asks again.
+/// under the app (the download arrow), so the next frame asks again.
 static NERD: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 thread_local! {
     /// Tests draw each look whatever font this machine has.
@@ -2285,7 +2308,7 @@ fn square(
             "refresh" => "↻",
             "phone" => "▯",
             "check" => "✓",
-            "heart" => "♡",
+            "heart" | "heart-open" => "♡",
             "mic" => "●",
             "stop" => "■",
             "send" => "➤",
@@ -2362,6 +2385,7 @@ fn square(
             "plus" => "\u{f067}",
             "close" => "\u{f00d}",
             "refresh" => "\u{f021}",
+            "download" => "\u{f019}",
             "phone" => "\u{f10b}",
             "check" => "\u{f00c}",
             "mic" => "\u{f130}",
@@ -2808,20 +2832,6 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
             .unwrap_or(8)
         + 2;
     let mut tools: Vec<Control> = Vec::new();
-    if state.app_update.is_some() {
-        tools.push(("Update app", Click::UpdateApp, !state.upgrading && !active));
-    }
-    if let Some(label) = &state.model_update {
-        tools.push((
-            if label == "first" {
-                "Get model"
-            } else {
-                "New model"
-            },
-            Click::UpdateModel,
-            !state.upgrading && !active,
-        ));
-    }
     if let Some(label) = &state.model_switch {
         tools.insert(
             0,
@@ -2835,30 +2845,20 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
     if chat_offered(state) {
         tools.insert(0, ("mode", Click::Mode, !state.busy && !active));
     }
-    if state.font_offer {
-        // Before the model in the list: the model's chip keeps its place nearest the buttons.
-        let at = tools
-            .len()
-            .saturating_sub(usize::from(state.model_update.is_some()));
-        tools.insert(
-            at,
-            ("Get font", Click::GetFont, !state.upgrading && !active),
-        );
-    }
-    if state.sharing {
-        // Only while sharing is on, as the way to switch it off; the first chip to give way
-        // on a narrow screen (`3yiddish share off` does the same).
-        tools.insert(0, ("Sharing", Click::Play(PlayClick::ShareOpen), !active));
-    }
     let mut x = area.right();
     for (icon, color, action, enabled) in [
         (("close", "✕"), THEME_RECORD, Click::Key(KeyCode::Esc), true),
-        (
-            ("refresh", "↻"),
-            THEME_ACCENT,
-            Click::Key(KeyCode::Char('r')),
-            !state.busy && !active,
-        ),
+        // Something to get (a new version, a model, the font): the refresh button becomes
+        // the way to get it, and the bar says what a click will do.
+        match offer(state) {
+            Some((action, _)) => (("download", "↓"), THEME_ACCENT, action, !active),
+            None => (
+                ("refresh", "↻"),
+                THEME_ACCENT,
+                Click::Key(KeyCode::Char('r')),
+                !state.busy && !active,
+            ),
+        },
     ] {
         x -= side_w;
         square(
@@ -2872,7 +2872,7 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
         );
         x -= 1;
     }
-    // The engine button is the first to go when the bar is crowded: the update chips, the
+    // The engine button is the first to go when the bar is crowded: the
     // status (room is kept for it, so the button does not come and go with every recording)
     // and an alert all come before it.
     // A chip's columns and the gap after it.
@@ -2911,13 +2911,19 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
     // Contribute: in the accent color while the playground (or its explanation) shows.
     let lit = play || state.play.consent;
     if x >= logo_end + side_w && (lit || x >= logo_end + side_w + 1 + chips + 16) {
-        // The update chips come first on a narrow screen, but never the way back to the chat.
+        // The buttons to its left come first on a narrow screen, but never the way back to the chat.
         x -= side_w;
         square(
             frame,
             &mut hits,
             Rect::new(x, area.y, side_w, 3),
-            ("heart", &["♥"]),
+            // A full heart while sharing is on, an open one otherwise; the way to stop
+            // sharing is inside Contribute.
+            if state.sharing {
+                ("heart", &["♥"])
+            } else {
+                ("heart-open", &["♡"])
+            },
             if lit { THEME_ACCENT } else { Color::Gray },
             Click::Play(PlayClick::Toggle),
             !active && !state.play.thinking,
@@ -3033,10 +3039,17 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
     }
     // Alerts live in the top bar, between the logo and the buttons. One that does not fit
     // there whole (a narrow window, a phone) gets the row under the bar to itself.
-    if !state.notice.is_empty() {
+    // With nothing else to say, the bar says what the download button is offering.
+    let hint = offer(state)
+        .filter(|_| state.notice.is_empty() && !active && !state.busy)
+        .map(|(_, words)| words);
+    if !state.notice.is_empty() || hint.is_some() {
         let left = logo_end;
         let right = x.saturating_sub(status_w + 2);
-        let notice = clean(&state.notice).replace('\n', " ");
+        let notice = match hint {
+            Some(words) => words.to_owned(),
+            None => clean(&state.notice).replace('\n', " "),
+        };
         let length = notice.chars().count() as u16;
         if right > left && length <= right - left {
             // Centered on the window itself; nudged only if it would touch the logo or buttons.
@@ -3047,7 +3060,7 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
                 Paragraph::new(notice).style(Style::default().fg(THEME_ACCENT)),
                 Rect::new(start, head, length, 1),
             );
-        } else {
+        } else if hint.is_none() {
             let mut text: String = notice.chars().take(area.width as usize).collect();
             if length > area.width {
                 text.pop();
@@ -4147,6 +4160,30 @@ mod tests {
         assert_eq!(again.input, "a draft");
     }
     #[test]
+    fn the_refresh_button_offers_what_there_is_to_get() {
+        let mut state = Screen::default();
+        assert!(offer(&state).is_none());
+        state.font_offer = true;
+        assert_eq!(offer(&state).unwrap().0, Click::GetFont);
+        state.model_update = Some("2027.1.1".into());
+        assert_eq!(offer(&state).unwrap().0, Click::UpdateModel);
+        state.app_update = Some("9.9.9".into());
+        assert_eq!(offer(&state).unwrap().0, Click::UpdateApp);
+        state.model_update = Some("first".into());
+        assert_eq!(offer(&state).unwrap().0, Click::UpdateModel);
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
+        let mut hits = vec![];
+        term.draw(|f| hits = draw_plain(f, &state)).unwrap();
+        assert!(rendered_text(&term).contains("Click the arrow to get the model."));
+        assert!(hits.iter().any(|h| h.action == Click::UpdateModel));
+        // While it downloads, and once a new version waits to be started, it is Refresh again.
+        state.upgrading = true;
+        assert!(offer(&state).is_none());
+        state.upgrading = false;
+        state.restart_due = true;
+        assert!(offer(&state).is_none());
+    }
+    #[test]
     fn top_bar_chips_are_the_shape_of_the_buttons() {
         let buttons = [
             Click::Key(KeyCode::Esc),
@@ -4201,6 +4238,12 @@ mod tests {
                     .area;
                 assert_eq!(close.height, 3, "{at}");
                 for action in buttons {
+                    // With something to get, the refresh button is the way to get it.
+                    let action = if crowded && action == Click::Key(KeyCode::Char('r')) {
+                        Click::UpdateModel
+                    } else {
+                        action
+                    };
                     let Some(hit) = hits.iter().find(|h| h.action == action) else {
                         // Crowded: the engine and Contribute chips give way first.
                         assert!(
@@ -4310,9 +4353,7 @@ mod tests {
         for width in [62, 70, 80, 100] {
             let (text, clickable) = show(&state, width);
             assert!(!clickable, "{width}: no switching while transcribing");
-            for kept in ["Update app", "Get model", "◌ Transcribing"] {
-                assert!(text.contains(kept), "{width}: {kept}");
-            }
+            assert!(text.contains("◌ Transcribing"), "{width}");
         }
         assert!(show(&state, 100).0.contains("Could not hear anything."));
         state.busy = false;
@@ -4423,9 +4464,14 @@ mod tests {
                             );
                         }
                         if name == "first" {
-                            // The font chip gives way first where both do not fit.
-                            assert!(width < 50 || text.contains("Get font"), "{at}\n{text}");
-                            assert!(text.contains("Get model"), "{at}\n{text}");
+                            // The refresh button is the way to get the model.
+                            assert!(
+                                hits.iter().any(|h| h.action == Click::UpdateModel)
+                                    && !hits
+                                        .iter()
+                                        .any(|h| h.action == Click::Key(KeyCode::Char('r'))),
+                                "{at}\n{text}"
+                            );
                         }
                         if let Ok(folder) = std::env::var("TUI_LAYOUT_DUMP_DIR") {
                             std::fs::create_dir_all(&folder).unwrap();

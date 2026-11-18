@@ -30,7 +30,7 @@ Got a graphics card? The installer notices and gives you the GPU build, which is
 times faster. A little GPU/CPU button on top shows which one is running; click it to switch.
 On an Android phone it works inside Termux too. It needs the Termux:API app (from the same
 place you got Termux) for the microphone, and the installer tells you if it is missing. Tap
-**Get font** once so the Yiddish letters are drawn properly; Termux's own font stretches
+the **arrow** at the top once so the Yiddish letters are drawn properly; Termux's own font stretches
 them. (To undo: `rm ~/.termux/font.ttf; termux-reload-settings`.)
 
 ## Use it
@@ -65,7 +65,7 @@ One more thing:
 
 ## Updates? Automatic-ish
 
-When there's a new version or a smarter model, the app shows a button. Click it. Done.
+When there's a new version or a smarter model, the Refresh button turns into an arrow. Click it. Done.
 New models only ship after they beat the old one on our test, so they only get better.
 Don't like the new one? `3yiddish model rollback`.
 
@@ -85,7 +85,7 @@ Yes. It all runs on your computer, and your voice stays there unless you say oth
   answer is **No** unless you pick Yes.
 - **Contribute** (the heart) tells you what it sends before you accept, and accepting it turns
   sharing on too.
-- Changed your mind? Click **Sharing** at the top, or run `3yiddish share off`. That
+- Changed your mind? Click the heart, then **Sharing is on**, or run `3yiddish share off`. That
   also deletes anything still waiting to be sent.
 
 Shared recordings go with their text and a few technical facts (versions, GPU or CPU,

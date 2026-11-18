@@ -78,7 +78,7 @@ pub(super) enum PlayClick {
     /// The explanation's answers.
     Accept,
     Decline,
-    /// Sharing: the top bar's chip opens its card; the answer (yes or no / stop), or close.
+    /// Sharing: Contribute's button opens its card; the answer (yes or no / stop), or close.
     ShareOpen,
     Share(bool),
     ShareClose,
@@ -135,7 +135,7 @@ pub(super) enum Answer {
     Sent(Result<Value, String>),
 }
 
-/// The sharing card: the first-run question, or (from the top bar's Sharing chip) what is
+/// The sharing card: the first-run question, or (from Contribute's Sharing button) what is
 /// being shared, with Stop sharing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ShareCard {
@@ -2061,10 +2061,23 @@ fn draw_record(frame: &mut Frame, state: &Screen, region: Rect, hits: &mut Vec<H
                 ]
                 .into_iter()
                 .chain(play.send_button().filter(|_| !busy))
+                .chain(sharing_button(state))
                 .collect::<Vec<_>>(),
             );
         }
     });
+}
+
+/// While sharing is on, Contribute carries the way to look at it and stop it.
+fn sharing_button(state: &Screen) -> Option<(Line<'static>, Color, Click, bool)> {
+    state.sharing.then(|| {
+        (
+            Line::from("Sharing is on"),
+            surface(),
+            Click::Play(PlayClick::ShareOpen),
+            true,
+        )
+    })
 }
 
 /// The rows Review needs with fat buttons: the draft's card at its smallest and the buttons,
@@ -2840,6 +2853,7 @@ fn draw_list(frame: &mut Frame, state: &Screen, region: Rect, hits: &mut Vec<Hit
                     true,
                 )];
                 buttons.extend(play.send_button());
+                buttons.extend(sharing_button(state));
                 buttons
             });
         }
@@ -2860,7 +2874,7 @@ const EXPLAIN: [&str; 6] = [
 const TERMS: [&str; 3] = [
     "Your takes stay on this computer until you press Send. What you send is used to test, and maybe later to improve, Yiddish speech to text, and may be published as a test set under any name you choose.",
     "",
-    "Accepting also switches on sharing: what you transcribe in the rest of the app, your recordings and files with the text the app wrote and technical facts, is sent to 3Yiddish, kept privately, and used to test and maybe later improve it. You can switch it off any time with Sharing at the top, or: 3yiddish share off",
+    "Accepting also switches on sharing: what you transcribe in the rest of the app, your recordings and files with the text the app wrote and technical facts, is sent to 3Yiddish, kept privately, and used to test and maybe later improve it. You can switch it off any time here in Contribute (the heart at the top), or: 3yiddish share off",
 ];
 /// What contributing means, with Never mind and I accept under it. Shown until accepted.
 pub(super) fn draw_consent(frame: &mut Frame, region: Rect, hits: &mut Vec<Hit>) {
@@ -3755,10 +3769,10 @@ mod tests {
         assert!(!rendered_text(&term).contains("Take "));
     }
 
-    /// The Sharing chip shows only while sharing is on, and opens its card; the explanation
-    /// accepted before sharing existed is not taken as accepting it.
+    /// The way to stop sharing is inside Contribute, only while sharing is on, and not in the
+    /// top bar; the explanation accepted before sharing existed is not taken as accepting it.
     #[test]
-    fn sharing_shows_in_the_top_bar_only_while_on() {
+    fn sharing_shows_inside_contribute_only_while_on() {
         for (phone, nerd) in [(false, false), (false, true), (true, false), (true, true)] {
             PHONE_LOOK.with(|o| o.set(phone));
             NERD_FOR_TEST.with(|n| n.set(Some(nerd)));
@@ -3768,11 +3782,17 @@ mod tests {
                     hits.iter()
                         .any(|h| h.action == Click::Play(PlayClick::ShareOpen))
                 };
+                state.playground = true;
+                state.play.view = true;
+                state.play.loaded = true;
                 assert!(!opens(&draw(&state, size).1));
                 state.sharing = true;
                 let (term, hits) = draw(&state, size);
                 assert!(opens(&hits), "{size:?}\n{}", rendered_text(&term));
-                assert!(rendered_text(&term).contains("Sharing"));
+                assert!(rendered_text(&term).contains("Sharing is on"));
+                state.playground = false;
+                state.play.view = false;
+                assert!(!opens(&draw(&state, size).1));
             }
         }
         let dir = crate::share::tests::Scratch::new();

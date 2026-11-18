@@ -116,7 +116,7 @@ if [ "$os" = Android ]; then
     fi
   fi
   if [ ! -e "$HOME/.termux/font.ttf" ]; then
-    echo "For well-drawn Yiddish letters, tap Get font"
+    echo "For well-drawn Yiddish letters, tap the arrow at the top"
     echo "in the app (or run: 3yiddish font)."
   fi
 fi
