@@ -22,8 +22,9 @@ export function Keys({ shortcut, className }: { shortcut: string; className?: st
 }
 
 /**
- * The push-to-talk key: click, press any key or combination, and it is in use at once. The
- * current shortcut is let go while choosing, so pressing it is just a key press.
+ * The push-to-talk key: click, press any key or combination, and it is in use at once. Two or
+ * more modifiers alone (Ctrl + Win) count too, once they are let go. The current shortcut is
+ * let go while choosing, so pressing it is just a key press.
  */
 export function ShortcutPicker({
   shortcut,
@@ -57,6 +58,9 @@ export function ShortcutPicker({
 
   useEffect(() => {
     if (!capturing) return;
+    // The most modifiers held at once with no other key, for a shortcut of modifiers alone.
+    let most: string[] = [];
+    let other = false;
     const stop = () => {
       setCapturing(false);
       setHeld([]);
@@ -66,16 +70,30 @@ export function ShortcutPicker({
       e.preventDefault();
       e.stopImmediatePropagation();
       const code = keyCode(e);
+      // The key the app presses so Win and Alt open no Start menu (see ptt.rs).
+      if (code === "Unidentified") return;
       if (code === "Escape" && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey) return stop();
       const modifiers = heldModifiers(e);
-      if (isModifier(code) || !code) return setHeld(modifiers);
+      if (isModifier(code) || !code) {
+        if (!other && modifiers.length > most.length) most = modifiers;
+        return setHeld(modifiers);
+      }
+      other = true;
       stop();
       void use(accelerator(modifiers, code));
     };
     const up = (e: KeyboardEvent) => {
       e.preventDefault();
       e.stopImmediatePropagation();
-      setHeld(heldModifiers(e));
+      const modifiers = heldModifiers(e);
+      setHeld(modifiers);
+      if (modifiers.length) return;
+      if (!other && most.length >= 2) {
+        stop();
+        void use(most.join("+"));
+      }
+      most = [];
+      other = false;
     };
     const blur = () => stop();
     window.addEventListener("keydown", down, true);

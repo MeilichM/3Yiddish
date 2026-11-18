@@ -132,7 +132,7 @@ export default function App() {
         case "cancelled":
           setPtt(false);
           setRecording(false);
-          if (document.visibilityState === "visible") toast(e.reason);
+          if (e.reason && document.visibilityState === "visible") toast(e.reason);
           break;
         case "transcribing":
           setPtt(false);

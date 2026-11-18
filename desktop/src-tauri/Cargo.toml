@@ -33,6 +33,15 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 sha2 = "0.11"
 tokio = { version = "1", features = ["time"] }
 
+# Push-to-talk on modifier keys alone (Ctrl + Win): a keyboard hook, since a global shortcut
+# needs one ordinary key.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
 [features]
 # Graphics card through Vulkan (Windows, Linux). macOS always uses Metal.
 vulkan = ["three-yiddish/vulkan"]

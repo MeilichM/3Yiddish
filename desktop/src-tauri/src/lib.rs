@@ -546,6 +546,7 @@ fn shortcut_set(shortcut: Option<String>, app: AppHandle, core: Shared) -> Out<(
 #[tauri::command]
 fn shortcut_pause(paused: bool, app: AppHandle, core: Shared) -> Out<()> {
     let current = core.shortcut.lock().map_err(fail)?.clone();
+    ptt::held::choosing(&app, paused);
     ptt::register(&app, if paused { None } else { current.as_deref() })
 }
 
