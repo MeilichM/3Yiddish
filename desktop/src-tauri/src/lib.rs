@@ -224,9 +224,13 @@ fn status(core: Shared) -> Status {
 }
 
 /// A newer model version than the installed one, if GitHub has one. Silent when offline.
+/// A model put in by hand is never offered a replacement.
 #[tauri::command]
 async fn newer_model() -> Option<String> {
     tauri::async_runtime::spawn_blocking(|| {
+        if model::current_is_local(&paths::models()) {
+            return None;
+        }
         let latest = model::latest_version().ok()?;
         let have = model::current(&paths::models()).map(|(v, ..)| v);
         (have.as_deref() != Some(latest.as_str())).then_some(latest)

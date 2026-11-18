@@ -426,6 +426,7 @@ export default function App() {
     try {
       await api.setCompute(mode as Compute);
       setStatus((s) => (s ? { ...s, compute: mode as Compute } : s));
+      toast(mode === "gpu" ? "Now running on the graphics card." : "Now running on the processor.");
       api.warm().catch((e) => toast.error(message(e)));
     } catch (e) {
       toast.error(message(e));
