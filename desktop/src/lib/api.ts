@@ -7,6 +7,8 @@ export type Compute = "gpu" | "cpu";
 export interface Status {
   appVersion: string;
   model: string | null;
+  /** Every model on disk that can be run: its folder (version) and the name to show. */
+  models: { version: string; label: string }[];
   compute: Compute;
   gpuAvailable: boolean;
   gpuName: string | null;
@@ -121,6 +123,7 @@ export const api = {
   newerModel: () => invoke<string | null>("newer_model"),
   pullModel: () => invoke<string>("pull_model"),
   rollbackModel: () => invoke<string>("rollback_model"),
+  switchModel: (version: string) => invoke<string>("switch_model", { version }),
   warm: () => invoke<void>("warm"),
   setCompute: (mode: Compute) => invoke<void>("set_compute", { mode }),
   recordStart: () => invoke<void>("record_start"),

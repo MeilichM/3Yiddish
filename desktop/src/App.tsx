@@ -15,8 +15,11 @@ import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Progress as Bar } from "@/components/ui/progress";
@@ -421,6 +424,20 @@ export default function App() {
     }
   }
 
+  /** The model tag's menu: make another installed model the active one. */
+  async function switchModel(version: string) {
+    if (!version || version === status?.model || recording) return;
+    try {
+      const label = await api.switchModel(version);
+      await refresh();
+      api.newerModel().then(setNewer);
+      toast(`Now using the ${label} model.`);
+      api.warm().catch((e) => toast.error(message(e)));
+    } catch (e) {
+      toast.error(message(e));
+    }
+  }
+
   async function setCompute(mode: string) {
     if (!mode || mode === status?.compute) return;
     try {
@@ -443,6 +460,9 @@ export default function App() {
     setEntries([]);
   }
 
+  /** The active model's name: its own label (a hand-placed model's), else its version. */
+  const modelLabel = status?.models.find((m) => m.version === status.model)?.label ?? status?.model;
+
   // The logo and the model. On a Mac they get a row under the window buttons; elsewhere
   // (Windows, Linux) nothing else is up there, so they start the top row.
   const brand = (
@@ -455,37 +475,64 @@ export default function App() {
       >
         <Wordmark className="h-4" />
       </button>
+      {/* The model tag opens a menu: the installed models to switch between (when there is more
+          than one), and the check for a newer model. */}
       {status?.model && (
         <span data-give-way="model" className="flex">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              onClick={checkForUpdates}
-              disabled={pulling || checking}
-              aria-label={newer ? `Model ${status.model}: download model ${newer}` : `Model ${status.model}: check for a newer model`}
-              className={cn(
-                badgeVariants({ variant: "secondary" }),
-                "relative cursor-pointer gap-1 overflow-visible font-normal tabular-nums hover:bg-secondary/70 disabled:cursor-default",
-              )}
-            >
-              {(pulling || checking) && <LoaderCircle className="animate-spin" />}
-              Model {status.model}
-              {newer && !pulling && (
-                <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-red-500 ring-2 ring-background" />
-              )}
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>
-            {pulling
-              ? "Downloading the new model…"
-              : checking
-                ? "Looking for a newer model…"
-                : newer
-                  ? `New speech model ${newer}: click to download`
-                  : "Check for a newer model"}
-          </TooltipContent>
-        </Tooltip>
+        <DropdownMenu>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  disabled={pulling || checking}
+                  aria-label={newer ? `Model ${modelLabel}: model ${newer} is available` : `Model ${modelLabel}`}
+                  className={cn(
+                    badgeVariants({ variant: "secondary" }),
+                    "relative cursor-pointer gap-1 overflow-visible font-normal tabular-nums hover:bg-secondary/70 disabled:cursor-default",
+                  )}
+                >
+                  {(pulling || checking) && <LoaderCircle className="animate-spin" />}
+                  Model {modelLabel}
+                  <ChevronDown className="size-3 opacity-60" />
+                  {newer && !pulling && (
+                    <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-red-500 ring-2 ring-background" />
+                  )}
+                </button>
+              </DropdownMenuTrigger>
+            </TooltipTrigger>
+            <TooltipContent>
+              {pulling
+                ? "Downloading the new model…"
+                : checking
+                  ? "Looking for a newer model…"
+                  : newer
+                    ? `New speech model ${newer}`
+                    : "Speech model"}
+            </TooltipContent>
+          </Tooltip>
+          <DropdownMenuContent align="start" className="min-w-44">
+            {status.models.length > 1 && (
+              <>
+                <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">Speech model</DropdownMenuLabel>
+                <DropdownMenuRadioGroup value={status.model} onValueChange={switchModel}>
+                  {status.models.map((m) => (
+                    <DropdownMenuRadioItem key={m.version} value={m.version} disabled={recording}>
+                      {m.label}
+                      {m.label !== m.version && (
+                        <span className="ms-auto ps-3 text-xs text-muted-foreground tabular-nums">{m.version}</span>
+                      )}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+                <DropdownMenuSeparator />
+              </>
+            )}
+            <DropdownMenuItem onSelect={checkForUpdates}>
+              {newer ? `Download model ${newer}` : "Check for a newer model"}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
         </span>
       )}
     </>

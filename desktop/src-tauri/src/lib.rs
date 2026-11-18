@@ -123,9 +123,18 @@ fn peaks(pcm: &[f32]) -> Vec<f32> {
 struct Status {
     app_version: &'static str,
     model: Option<String>,
+    /// Every model on disk that can be run, for the model tag's menu.
+    models: Vec<Installed>,
     compute: &'static str,
     gpu_available: bool,
     gpu_name: Option<String>,
+}
+
+#[derive(Serialize)]
+struct Installed {
+    version: String,
+    /// The name to show: the model's own label, else its version.
+    label: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -217,6 +226,10 @@ fn status(core: Shared) -> Status {
     Status {
         app_version: env!("CORE_VERSION"),
         model: model::current(&paths::models()).map(|(v, ..)| v),
+        models: model::installed(&paths::models())
+            .into_iter()
+            .map(|(version, label)| Installed { version, label })
+            .collect(),
         compute: compute.name(),
         gpu_available: asr::gpu_usable(),
         gpu_name: asr::gpu_name(),
@@ -265,6 +278,34 @@ fn rollback_model(core: Shared) -> Out<String> {
     let version = model::rollback(&paths::models()).map_err(fail)?;
     core.drop_engine();
     Ok(version)
+}
+
+/// Make one of the installed models the active one; returns its name. Nothing is deleted, and
+/// the one it replaces is what Roll back returns to (as with the terminal app's model switch).
+#[tauri::command]
+fn switch_model(version: String, core: Shared) -> Out<String> {
+    let root = paths::models();
+    let label = model::installed(&root)
+        .into_iter()
+        .find(|(v, _)| *v == version)
+        .map(|(_, label)| label)
+        .ok_or("That model is not installed.")?;
+    let now = model::current(&root).map(|(v, ..)| v);
+    if now.as_deref() != Some(version.as_str()) {
+        if let Some(old) = now {
+            write_atomic(&root.join("previous"), &old).map_err(fail)?;
+        }
+        write_atomic(&root.join("current"), &version).map_err(fail)?;
+        core.drop_engine();
+    }
+    Ok(label)
+}
+
+/// The core's model folder keeps `current` and `previous` as one-line files; replace one whole.
+fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(tmp, path)
 }
 
 /// Load the model in the background so the first transcription does not wait for it.
@@ -687,6 +728,7 @@ pub fn run() {
             newer_model,
             pull_model,
             rollback_model,
+            switch_model,
             warm,
             set_compute,
             record_start,
