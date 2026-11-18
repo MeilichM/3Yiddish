@@ -274,6 +274,10 @@ impl Engine {
 
     /// 16 kHz mono samples in, Yiddish text out.
     pub fn transcribe(&self, pcm: &[f32]) -> Result<String> {
+        // A silent room: either model would write a made-up sentence for it.
+        if !loud_enough(pcm) {
+            return Ok(String::new());
+        }
         match &self.0 {
             Kind::Whisper(w) => w.transcribe(pcm),
             #[cfg(feature = "omni")]
@@ -404,7 +408,27 @@ impl Whisper {
         }
     }
 
+    /// Is anyone talking in `pcm`? The model writes a made-up sentence for a noise-only
+    /// recording, so the voice detector that comes with the model looks first. If the
+    /// detector cannot run, the recording goes to the model as before.
+    fn speech(&self, pcm: &[f32]) -> bool {
+        let Some(vad) = &self.vad else { return true };
+        let mut params = whisper_rs::WhisperVadContextParams::new();
+        params.set_n_threads(threads());
+        params.set_use_gpu(false);
+        let Ok(mut detector) = whisper_rs::WhisperVadContext::new(vad, params) else {
+            return true;
+        };
+        match detector.segments_from_samples(whisper_rs::WhisperVadParams::new(), pcm) {
+            Ok(segments) => segments.num_segments() > 0,
+            Err(_) => true,
+        }
+    }
+
     fn run(&self, ctx: &WhisperContext, pcm: &[f32]) -> Result<String> {
+        if !self.speech(pcm) {
+            return Ok(String::new());
+        }
         let mut state = ctx.create_state()?;
         let beam = std::env::var("THREE_YIDDISH_BEAM")
             .ok()
@@ -451,6 +475,14 @@ impl Whisper {
         }
         Ok(text.join(" "))
     }
+}
+
+/// Below this peak (about -50 dB of full scale) a recording is a silent room, not a voice.
+const QUIET: f32 = 0.003;
+
+/// Does the recording rise above a silent room anywhere?
+fn loud_enough(pcm: &[f32]) -> bool {
+    pcm.iter().any(|s| s.abs() >= QUIET)
 }
 
 /// whisper.cpp calls this before it picks each next piece of text.
@@ -625,6 +657,13 @@ pub fn wav(pcm: &[f32]) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_silent_room_is_not_a_voice() {
+        assert!(!super::loud_enough(&[0.0, 0.0004, -0.002]));
+        assert!(super::loud_enough(&[0.0, 0.05, -0.002]));
+        assert!(!super::loud_enough(&[]));
+    }
+
     use super::*;
     #[test]
     fn compute_choice_is_env_then_file_then_automatic() {

@@ -1184,7 +1184,9 @@ fn terminal(
                         Ok(value) => {
                             state.notice.clear();
                             let answer = value["text"].as_str().unwrap_or_default().trim();
-                            if !answer.is_empty() {
+                            if answer.is_empty() {
+                                state.notice = "Could not hear anything.".into();
+                            } else {
                                 state.plain_log.push((false, answer.to_owned()));
                             }
                         }
