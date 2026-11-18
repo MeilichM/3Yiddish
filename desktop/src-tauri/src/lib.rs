@@ -369,7 +369,7 @@ async fn import_bytes(request: tauri::ipc::Request<'_>, core: Shared<'_>) -> Out
         .headers()
         .get("x-file-name")
         .and_then(|v| v.to_str().ok())
-        .map(|v| percent_decode(v))
+        .map(percent_decode)
         .unwrap_or_else(|| "audio".into());
     let ext = Path::new(&name)
         .extension()

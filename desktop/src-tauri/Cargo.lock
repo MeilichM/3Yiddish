@@ -6445,7 +6445,7 @@ dependencies = [
 
 [[package]]
 name = "three-yiddish"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6481,7 +6481,7 @@ dependencies = [
 
 [[package]]
 name = "three-yiddish-desktop"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
