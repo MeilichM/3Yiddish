@@ -5,6 +5,8 @@
 **You talk Yiddish. It types Yiddish.** On your own computer, for free, no account,
 no cloud, no nonsense. Yes, it knows loshn koydesh. Mostly. It's learning. Be nice.
 
+**[How good is it? See the benchmark.](BENCHMARK.md)**
+
 ![The app: you talk, Yiddish appears](assets/readme/chat.png)
 
 ## Get it (one line, we promise)

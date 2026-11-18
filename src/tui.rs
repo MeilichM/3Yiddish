@@ -23,8 +23,10 @@ mod playground;
 use playground::{Page, PlayClick, ShareCard};
 enum Update {
     Status(Value),
-    /// A transcript from the service, or why there is none.
+    /// A transcript (or, in chat, the reply) from the service, or why there is none.
     Done(Result<Value, String>),
+    /// Chat: what the service heard in the recording just sent, shown as the user's words.
+    Heard(String),
     /// Newer app release / newer (or first) model found by the background check.
     Available(Option<String>, Option<String>),
     /// Progress or result of an app/model update, shown as the notice line.
@@ -193,6 +195,12 @@ struct Screen {
     plain_log: Vec<(bool, String)>,
     /// Sent recordings and files, by their place in `plain_log`: shown as voice notes.
     voices: std::collections::HashMap<usize, Voice>,
+    /// Chatting (true) or writing down what is said (false). The messages, voice notes and
+    /// draft of the one not showing wait in `other_*`.
+    chat: bool,
+    other_log: Vec<(bool, String)>,
+    other_voices: std::collections::HashMap<usize, Voice>,
+    other_input: String,
     /// The voice note being listened to.
     voice_play: Option<VoicePlay>,
     /// Microphone loudness over the current recording, one value per screen refresh.
@@ -221,6 +229,8 @@ struct Screen {
     /// Updates found at startup (app version, model label) and whether one is running.
     app_update: Option<String>,
     model_update: Option<String>,
+    /// The active model's name, when more than one is installed and a click can switch.
+    model_switch: Option<String>,
     /// Termux with the phone's own font: offer the font in which Yiddish letters read well.
     font_offer: bool,
     upgrading: bool,
@@ -266,6 +276,13 @@ struct Resume {
     /// it, or where the playground is off: the playground then opens first.
     #[serde(default)]
     playground_view: Option<bool>,
+    /// Chat was showing, and the messages and draft of the side that was not.
+    #[serde(default)]
+    chat: bool,
+    #[serde(default)]
+    other_log: Vec<(bool, String)>,
+    #[serde(default)]
+    other_input: String,
 }
 impl Resume {
     fn capture(s: &Screen) -> Self {
@@ -274,6 +291,15 @@ impl Resume {
             playground_view: s.playground.then_some(s.play.view),
             input: s.input.clone(),
             plain_log: s.plain_log.clone(),
+            chat: s.chat,
+            // Without its voice notes: a recording that was sent shows as its text only.
+            other_log: s
+                .other_log
+                .iter()
+                .filter(|(_, text)| !text.is_empty())
+                .cloned()
+                .collect(),
+            other_input: s.other_input.clone(),
             // The chat's voice notes only (a playground take is fetched again).
             voices: s
                 .voices
@@ -287,6 +313,9 @@ impl Resume {
         s.pair_view = self.pair_view;
         s.input = self.input;
         s.plain_log = self.plain_log;
+        s.chat = self.chat;
+        s.other_log = self.other_log;
+        s.other_input = self.other_input;
         s.voices = self
             .voices
             .into_iter()
@@ -531,6 +560,10 @@ enum Click {
     Record,
     UpdateApp,
     UpdateModel,
+    /// Use the next installed model.
+    SwitchModel,
+    /// Chat, or write down what is said.
+    Mode,
     GetFont,
     Compute,
     Attach,
@@ -573,6 +606,17 @@ fn switch_compute(state: &mut Screen) -> Option<bool> {
     state.compute_switch = Some(!gpu);
     Some(!gpu)
 }
+/// The active model's name for the switch chip; None with fewer than two models installed.
+fn model_switch_label() -> Option<String> {
+    let root = crate::paths::models();
+    let all = crate::model::installed(&root);
+    let now = crate::model::current(&root)?.0;
+    (all.len() > 1).then(|| {
+        all.into_iter()
+            .find(|(v, _)| *v == now)
+            .map(|(_, label)| label)
+    })?
+}
 #[derive(Clone, Copy)]
 struct Hit {
     area: Rect,
@@ -584,6 +628,76 @@ fn hit_at(hits: &[Hit], x: u16, y: u16) -> Option<Click> {
         .map(|h| h.action)
 }
 type Control<'a> = (&'a str, Click, bool);
+/// Work for the service: a recording or file to write down, or a chat turn.
+enum Job {
+    Transcribe(PathBuf),
+    /// The chat so far (sent by the user, text), ending in what the user just typed; or, with
+    /// `audio`, in what that recording says once it is written down.
+    Chat {
+        log: Vec<(bool, String)>,
+        audio: Option<PathBuf>,
+    },
+}
+/// One chat turn: the recording (if any) is written down first, then the whole chat goes to
+/// the service's chat model. Returns the reply as `{"text": ...}`.
+async fn chat(
+    client: &reqwest::Client,
+    base: &str,
+    mut log: Vec<(bool, String)>,
+    audio: Option<&Path>,
+    heard: &mpsc::UnboundedSender<Update>,
+) -> Result<Value> {
+    if let Some(path) = audio {
+        let said = transcribe(client, base, path).await?["text"]
+            .as_str()
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        if said.is_empty() {
+            bail!("Could not hear anything.");
+        }
+        let _ = heard.send(Update::Heard(said.clone()));
+        log.push((true, said));
+    }
+    // The last turns only: what a small model can keep in mind.
+    let from = log.len().saturating_sub(12);
+    let from = (from..log.len()).find(|&i| log[i].0).unwrap_or(from);
+    let messages: Vec<Value> = log[from..]
+        .iter()
+        .filter(|(_, text)| !text.trim().is_empty())
+        .map(|(user, text)| json!({"role": if *user { "user" } else { "assistant" }, "content": text}))
+        .collect();
+    let answer = json_response(
+        client
+            .post(format!("{base}/v1/chat/completions"))
+            .json(&json!({"messages": messages}))
+            .send()
+            .await?,
+    )
+    .await?;
+    let reply = answer
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .context("No reply")?;
+    Ok(json!({"text": reply}))
+}
+/// Does the service have a chat model set up? Only then is there a Chat button.
+fn chat_offered(state: &Screen) -> bool {
+    state.status.as_ref().is_some_and(|s| {
+        s.pointer("/components/schmooze/status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status != "placeholder")
+    })
+}
+/// Switch between writing down and chatting: each keeps its own messages and its own draft.
+fn switch_mode(state: &mut Screen) {
+    state.chat = !state.chat;
+    std::mem::swap(&mut state.plain_log, &mut state.other_log);
+    std::mem::swap(&mut state.voices, &mut state.other_voices);
+    std::mem::swap(&mut state.input, &mut state.other_input);
+    state.voice_play = None;
+    state.copied = None;
+}
 
 /// Is this playground button on the screen just drawn?
 fn offered(hits: &[Hit], action: PlayClick) -> bool {
@@ -617,7 +731,7 @@ async fn transcribe(client: &reqwest::Client, base: &str, path: &Path) -> Result
 }
 pub async fn run(client: reqwest::Client, base: String) -> Result<()> {
     let (tx, rx) = mpsc::unbounded_channel::<Update>();
-    let (jobs, mut pending) = mpsc::unbounded_channel::<PathBuf>();
+    let (jobs, mut pending) = mpsc::unbounded_channel::<Job>();
     let (compute_actions, mut compute_pending) = mpsc::unbounded_channel::<bool>();
     // Pair (true) and Unpair (false) clicks, for where the playground is switched on.
     let (pair_actions, mut pair_pending) = mpsc::unbounded_channel::<bool>();
@@ -703,7 +817,19 @@ pub async fn run(client: reqwest::Client, base: String) -> Result<()> {
     let done_tx = tx.clone();
     let (close_client, close_base) = (client.clone(), base.clone());
     let worker = tokio::spawn(async move {
-        while let Some(path) = pending.recv().await {
+        while let Some(job) = pending.recv().await {
+            let path = match job {
+                Job::Transcribe(path) => path,
+                Job::Chat { log, audio } => {
+                    let result = chat(&client, &base, log, audio.as_deref(), &done_tx)
+                        .await
+                        .map_err(|e| e.to_string());
+                    if done_tx.send(Update::Done(result)).is_err() {
+                        break;
+                    }
+                    continue;
+                }
+            };
             let started = std::time::Instant::now();
             let result = transcribe(&client, &base, &path)
                 .await
@@ -812,7 +938,7 @@ pub async fn run(client: reqwest::Client, base: String) -> Result<()> {
 }
 fn terminal(
     mut updates: mpsc::UnboundedReceiver<Update>,
-    jobs: mpsc::UnboundedSender<PathBuf>,
+    jobs: mpsc::UnboundedSender<Job>,
     compute_actions: mpsc::UnboundedSender<bool>,
     pair_actions: mpsc::UnboundedSender<bool>,
     play_jobs: mpsc::UnboundedSender<playground::Job>,
@@ -840,6 +966,9 @@ fn terminal(
         // Without a model the button to get one shows even offline (it then says so).
         let model = if have.is_none() {
             Some("first".to_owned())
+        } else if crate::model::current_is_local(&crate::paths::models()) {
+            // A model put here by hand is not replaced by the published one.
+            None
         } else {
             crate::model::latest_version()
                 .ok()
@@ -847,7 +976,10 @@ fn terminal(
         };
         let _ = check_tx.send(Update::Available(app, model));
     });
-    let mut state = Screen::default();
+    let mut state = Screen {
+        model_switch: model_switch_label(),
+        ..Screen::default()
+    };
     let mut playground_view = None;
     if let Some(path) = std::env::var_os("THREE_YIDDISH_TUI_RESUME") {
         let path = PathBuf::from(path);
@@ -978,7 +1110,14 @@ fn terminal(
                                     voice.peaks = peaks(&levels);
                                 }
                             }
-                            jobs.send(path)?;
+                            jobs.send(if state.chat {
+                                Job::Chat {
+                                    log: state.plain_log.clone(),
+                                    audio: Some(path),
+                                }
+                            } else {
+                                Job::Transcribe(path)
+                            })?;
                             state.busy = true;
                         }
                         Err(error) => {
@@ -1013,6 +1152,7 @@ fn terminal(
                         state.pending_key = Some(KeyCode::Enter);
                     }
                 }
+                Update::Heard(said) => state.plain_log.push((true, said)),
                 Update::Done(result) => {
                     state.busy = false;
                     match result {
@@ -1303,7 +1443,22 @@ fn terminal(
                     );
                     state.plain_log.push((true, String::new()));
                     state.input.clear();
-                    jobs.send(PathBuf::from(text))?;
+                    jobs.send(if state.chat {
+                        Job::Chat {
+                            log: state.plain_log.clone(),
+                            audio: Some(PathBuf::from(text)),
+                        }
+                    } else {
+                        Job::Transcribe(PathBuf::from(text))
+                    })?;
+                    state.busy = true;
+                } else if state.chat && !demo {
+                    state.plain_log.push((true, text));
+                    state.input.clear();
+                    jobs.send(Job::Chat {
+                        log: state.plain_log.clone(),
+                        audio: None,
+                    })?;
                     state.busy = true;
                 } else if demo {
                     state.plain_log.push((true, text));
@@ -1371,7 +1526,22 @@ fn click(
 ) -> Result<Option<KeyEvent>> {
     let code = match action {
         Click::Key(code) => code,
-        Click::Play(action) => return playground::click(state, action, play_jobs),
+        Click::Play(action) => {
+            let was = state.play.view;
+            let done = playground::click(state, action, play_jobs);
+            // The Contribute button says where it took you.
+            if action == PlayClick::Toggle && state.play.view != was && state.notice.is_empty() {
+                state.notice = if state.play.view {
+                    "Contribute: say a few things and fix the words."
+                } else if state.chat {
+                    "Back to the chat."
+                } else {
+                    "Back to transcribing."
+                }
+                .into();
+            }
+            return done;
+        }
         Click::Pair => {
             // The chip opens the view, and closes it again.
             state.pair_view = !state.pair_view;
@@ -1397,6 +1567,12 @@ fn click(
         Click::Compute => {
             if let Some(gpu) = switch_compute(state) {
                 compute_actions.send(gpu)?;
+                state.notice = if gpu {
+                    "Now running on the graphics card."
+                } else {
+                    "Now running on the processor."
+                }
+                .into();
             }
             return Ok(None);
         }
@@ -1460,6 +1636,26 @@ fn click(
                 };
                 let _ = tx.send(Update::Upgrade(text, true));
             });
+            return Ok(None);
+        }
+        Click::Mode => {
+            switch_mode(state);
+            state.notice = if state.chat {
+                "Chat: talk or type, and it answers."
+            } else {
+                "Transcribe: it writes down what you say."
+            }
+            .into();
+            return Ok(None);
+        }
+        Click::SwitchModel => {
+            match crate::model::switch_next(&crate::paths::models()) {
+                Ok((_, label)) => {
+                    state.notice = format!("Now using the {label} model.");
+                    state.model_switch = model_switch_label();
+                }
+                Err(e) => state.notice = crate::model::plain_error(&e),
+            }
             return Ok(None);
         }
         Click::GetFont => {
@@ -1527,6 +1723,10 @@ fn plain_alert(error: &str) -> String {
     };
     if said.starts_with("No Transcribe model yet") {
         "No model yet: use Get model first.".into()
+    } else if said.starts_with("Model endpoint could not be reached")
+        || said.starts_with("Translation worker is unreachable")
+    {
+        "The chat model is not running.".into()
     } else {
         said.to_owned()
     }
@@ -2083,6 +2283,7 @@ fn square(
             "refresh" => "↻",
             "phone" => "▯",
             "check" => "✓",
+            "heart" => "♡",
             "mic" => "●",
             "stop" => "■",
             "send" => "➤",
@@ -2215,94 +2416,22 @@ fn text_plate(frame: &mut Frame, area: Rect, text: &str, color: Color) {
         );
     }
 }
-/// A gray that reads on the surface color: `strength` of the way from it to white (to black
-/// on a light theme).
-fn neutral(strength: f32) -> [u8; 3] {
-    let surface = surface_rgb();
-    let light = surface.iter().map(|&c| c as u32).sum::<u32>() > 3 * 128;
-    let end = if light { 0.0 } else { 255.0 };
-    surface.map(|c| (c as f32 + (end - c as f32) * strength) as u8)
-}
-/// A word chip's width in columns, and how far its plate sits in from the sides of its
-/// picture: as far as a round button's does, so the gaps between all of them are the same.
-fn chip_columns(word: &str) -> (u16, u32) {
-    let side = button_columns() as u32;
-    GRAPHICS
-        .with(|g| {
-            g.borrow().as_ref().map(|g| {
-                let font = g.picker.font_size();
-                let (cell, height) = (font.width.max(1) as u32, font.height as u32 * 3);
-                let inset = (side * cell).saturating_sub(height * 2 / 3) / 2;
-                let columns = (crate::art::chip_width(height, word) + 2 * inset).div_ceil(cell);
-                (columns as u16, inset)
-            })
-        })
-        .unwrap_or((word.len() as u16 + if slim_round() { 4 } else { 2 }, 0))
-}
-/// The engine chip: "GPU" in the accent color or "CPU" in gray (dimmer when there is no GPU
-/// to switch to), as tall as the round buttons. A click switches engines.
-fn engine_chip(
-    frame: &mut Frame,
-    hits: &mut Vec<Hit>,
-    area: Rect,
-    (gpu, available): (bool, bool),
-    enabled: bool,
-) {
-    let word = if gpu { "GPU" } else { "CPU" };
-    let strength = if gpu {
-        1.0
-    } else if available {
-        0.6
+/// The picture and the character for what the app is doing: a speech bubble for chat, a
+/// written page for transcribing.
+fn mode_icon(chat: bool) -> (&'static str, &'static [&'static str]) {
+    if chat {
+        ("chat", &["❝"])
     } else {
-        0.3
-    };
-    word_chip(frame, hits, area, (word, strength), Click::Compute, enabled);
+        ("page", &["¶"])
+    }
 }
-/// A chip with a word in the logo's letters, as tall as the round buttons: in the accent
-/// color at full `strength`, in a gray that strong otherwise.
-fn word_chip(
-    frame: &mut Frame,
-    hits: &mut Vec<Hit>,
-    area: Rect,
-    (word, strength): (&str, f32),
-    action: Click,
-    enabled: bool,
-) {
-    if enabled {
-        hits.push(Hit { area, action });
+/// The picture and the character that stand for a model on its button.
+fn model_icon(label: &str) -> (&'static str, &'static [&'static str]) {
+    match label {
+        "Whisper" => ("whisper", &["W"]),
+        "Omnilingual" => ("omni", &["Ω"]),
+        _ => ("model", &["≡"]),
     }
-    let lit = strength >= 1.0;
-    if let Some(dark) = round_theme() {
-        let rgb = if lit {
-            theme_rgb().0
-        } else {
-            neutral(strength)
-        };
-        let inset = chip_columns(word).1;
-        if pixel_cell(frame, area, &format!("chip-{word}-{rgb:?}"), |w, h| {
-            crate::art::chip(w, h, inset, word, rgb, dark)
-        }) {
-            return;
-        }
-    }
-    let color = if lit {
-        THEME_ACCENT
-    } else if strength >= 0.5 {
-        Color::Reset
-    } else {
-        Color::DarkGray
-    };
-    if outline_controls() {
-        outline_box(frame, area, Color::DarkGray);
-        frame.render_widget(
-            Paragraph::new(word)
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(color)),
-            Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), 1),
-        );
-        return;
-    }
-    text_plate(frame, area, word, color);
 }
 /// Pair phone is offered on computers; on a phone the app is already on the phone.
 fn phone_button() -> bool {
@@ -2691,6 +2820,19 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
             !state.upgrading && !active,
         ));
     }
+    if let Some(label) = &state.model_switch {
+        tools.insert(
+            0,
+            (
+                label.as_str(),
+                Click::SwitchModel,
+                !state.upgrading && !state.busy && !active,
+            ),
+        );
+    }
+    if chat_offered(state) {
+        tools.insert(0, ("mode", Click::Mode, !state.busy && !active));
+    }
     if state.font_offer {
         // Before the model in the list: the model's chip keeps its place nearest the buttons.
         let at = tools
@@ -2728,65 +2870,82 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
         );
         x -= 1;
     }
-    // The engine chip is the first to go when the bar is crowded: the update chips, the
-    // status (room is kept for it, so the chip does not come and go with every recording)
+    // The engine button is the first to go when the bar is crowded: the update chips, the
+    // status (room is kept for it, so the button does not come and go with every recording)
     // and an alert all come before it.
-    let others = tools
-        .iter()
-        .map(|(label, ..)| label.chars().count() as u16 + 3)
-        .sum::<u16>()
+    // A chip's columns and the gap after it.
+    let tool_columns = |(label, action, _): &Control| {
+        if matches!(action, Click::SwitchModel | Click::Mode) {
+            side_w + 1
+        } else {
+            label.chars().count() as u16 + 3
+        }
+    };
+    let chips: u16 = tools.iter().map(tool_columns).sum();
+    let others = chips
         + 16
         // On the phone look an alert has its own row under the bar.
         + if state.notice.is_empty() || outline() { 0 } else { 9 };
-    let chips: u16 = tools
-        .iter()
-        .map(|(label, ..)| label.chars().count() as u16 + 3)
-        .sum();
-    if let Some(engine) = compute(state) {
-        let w = chip_columns("GPU").0;
-        if x >= logo_end + w + 1 + others {
-            x -= w;
-            engine_chip(
-                frame,
-                &mut hits,
-                Rect::new(x, area.y, w, 3),
-                engine,
-                engine.1 && state.compute_switch.is_none() && !state.busy && !active,
-            );
-            x -= 1;
-        }
-    }
-    // Contribute: the word where there is room for it, the check mark otherwise. In the
-    // accent color while the playground (or its explanation) shows.
-    let lit = play || state.play.consent;
-    let enabled = !active && !state.play.thinking;
-    let wide = chip_columns("CONTRIBUTE").0;
-    if x >= logo_end + wide + others {
-        x -= wide;
-        word_chip(
+    if let Some((gpu, available)) = compute(state)
+        && x >= logo_end + side_w + 1 + others
+    {
+        // A bolt for the graphics card, a chip for the processor; a click switches.
+        x -= side_w;
+        square(
             frame,
             &mut hits,
-            Rect::new(x, area.y, wide, 3),
-            ("CONTRIBUTE", if lit { 1.0 } else { 0.6 }),
-            Click::Play(PlayClick::Toggle),
-            enabled,
+            Rect::new(x, area.y, side_w, 3),
+            if gpu {
+                ("gpu", &["▦"])
+            } else {
+                ("cpu", &["▣"])
+            },
+            if gpu { THEME_ACCENT } else { Color::Gray },
+            Click::Compute,
+            available && state.compute_switch.is_none() && !state.busy && !active,
         );
-        x = x.saturating_sub(1);
-    } else if x >= logo_end + side_w && (lit || x >= logo_end + side_w + 1 + chips + 16) {
+        x -= 1;
+    }
+    // Contribute: in the accent color while the playground (or its explanation) shows.
+    let lit = play || state.play.consent;
+    if x >= logo_end + side_w && (lit || x >= logo_end + side_w + 1 + chips + 16) {
         // The update chips come first on a narrow screen, but never the way back to the chat.
         x -= side_w;
         square(
             frame,
             &mut hits,
             Rect::new(x, area.y, side_w, 3),
-            ("check", &["✓"]),
+            ("heart", &["♥"]),
             if lit { THEME_ACCENT } else { Color::Gray },
             Click::Play(PlayClick::Toggle),
-            enabled,
+            !active && !state.play.thinking,
         );
         x = x.saturating_sub(1);
     }
     for (label, action, enabled) in tools.iter().rev() {
+        if matches!(action, Click::SwitchModel | Click::Mode) {
+            // The model in use, and chat or transcribe, as buttons like the ones beside
+            // them; a click moves to the next one and the bar says its name.
+            if x < logo_end + side_w {
+                break;
+            }
+            x -= side_w;
+            square(
+                frame,
+                &mut hits,
+                Rect::new(x, area.y, side_w, 3),
+                if *action == Click::Mode {
+                    mode_icon(state.chat)
+                } else {
+                    model_icon(label)
+                },
+                THEME_ACCENT,
+                *action,
+                *enabled,
+            );
+            x = x.saturating_sub(1);
+            continue;
+        }
         let text = format!(" {label} ");
         let w = text.chars().count() as u16;
         // On a narrow screen the chips furthest from the buttons give way to the logo.
@@ -2844,7 +3003,11 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
     let status = if active {
         "● Recording"
     } else if state.busy {
-        "◌ Transcribing"
+        if state.chat {
+            "◌ Thinking"
+        } else {
+            "◌ Transcribing"
+        }
     } else {
         ""
     };
@@ -3927,6 +4090,180 @@ mod tests {
         }
     }
     #[test]
+    fn model_chip_shows_only_when_there_is_a_model_to_switch_to() {
+        let show = |state: &Screen| {
+            let mut term =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
+            let mut hits = vec![];
+            term.draw(|f| hits = draw_plain(f, state)).unwrap();
+            for (i, a) in hits.iter().enumerate() {
+                for b in &hits[i + 1..] {
+                    assert!(a.area.intersection(b.area).is_empty(), "overlap");
+                }
+            }
+            let clickable = hits.iter().any(|h| h.action == Click::SwitchModel);
+            (rendered_text(&term), clickable)
+        };
+        let mut state = Screen::default();
+        let (text, clickable) = show(&state);
+        assert!(!clickable && !text.contains("Ω"));
+        state.model_switch = Some("Omnilingual".into());
+        let (text, clickable) = show(&state);
+        assert!(clickable && text.contains("Ω"));
+    }
+    /// The model, engine and Contribute chips are buttons of the same shape as close and
+    /// refresh, in every look: three rows from the bar's top, the same plate or outline
+    /// above and below the text, and clickable over all of it. On a narrow pane the model's
+    /// chip stays, with close and refresh.
+    /// Chat and Transcribe each keep their own messages and draft, and the Chat button is
+    /// there only where the service has a chat model set up.
+    #[test]
+    fn chat_and_transcribe_keep_their_own_messages() {
+        let mut state = Screen::default();
+        assert!(!chat_offered(&state));
+        state.status = Some(json!({"components": {"schmooze": {"status": "placeholder"}}}));
+        assert!(!chat_offered(&state));
+        state.status =
+            Some(json!({"components": {"schmooze": {"status": "configured-not-probed"}}}));
+        assert!(chat_offered(&state));
+        state.plain_log.push((false, "written down".into()));
+        state.input = "a draft".into();
+        switch_mode(&mut state);
+        assert!(state.chat && state.plain_log.is_empty() && state.input.is_empty());
+        state.plain_log.push((true, "a question".into()));
+        // Refresh carries both sides and the side that was showing.
+        let kept = Resume::capture(&state);
+        let mut again = Screen::default();
+        serde_json::from_slice::<Resume>(&serde_json::to_vec(&kept).unwrap())
+            .unwrap()
+            .apply(&mut again);
+        assert!(again.chat);
+        assert_eq!(again.plain_log, vec![(true, "a question".to_owned())]);
+        switch_mode(&mut again);
+        assert!(!again.chat);
+        assert_eq!(again.plain_log, vec![(false, "written down".to_owned())]);
+        assert_eq!(again.input, "a draft");
+    }
+    #[test]
+    fn top_bar_chips_are_the_shape_of_the_buttons() {
+        let buttons = [
+            Click::Key(KeyCode::Esc),
+            Click::Key(KeyCode::Char('r')),
+            Click::Compute,
+            Click::Play(PlayClick::Toggle),
+            Click::SwitchModel,
+            Click::Mode,
+        ];
+        for (look, nerd) in [(false, false), (false, true), (true, false)] {
+            PHONE_LOOK.with(|o| o.set(look));
+            NERD_FOR_TEST.with(|n| n.set(Some(nerd)));
+            for (width, crowded) in [(100, false), (160, false), (100, true)] {
+                let mut state = Screen::default();
+                state.status = Some(json!({
+                    "compute": {"mode": "gpu", "gpu_available": true},
+                    "components": {"schmooze": {"status": "configured-not-probed"}},
+                }));
+                state.model_switch = Some("2026.11.11".into());
+                if crowded {
+                    state.sharing = true;
+                    state.app_update = Some("9.9.9".into());
+                    state.model_update = Some("first".into());
+                    state.font_offer = true;
+                    state.notice = "Could not hear anything.".into();
+                }
+                let mut term =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
+                let mut hits = vec![];
+                term.draw(|f| hits = draw_plain(f, &state)).unwrap();
+                let at = format!("look {look}, nerd {nerd}, {width} columns, crowded {crowded}");
+                for (i, a) in hits.iter().enumerate() {
+                    for b in &hits[i + 1..] {
+                        assert!(a.area.intersection(b.area).is_empty(), "{at}: overlap");
+                    }
+                }
+                let buffer = term.backend().buffer();
+                // Each button's top and bottom rows: the left corner, the middle and the
+                // right corner, with their colors.
+                let edges = |area: Rect| {
+                    [area.y, area.bottom() - 1].map(|y| {
+                        [area.x, area.x + 1, area.right() - 1].map(|x| {
+                            let cell = &buffer[(x, y)];
+                            (cell.symbol().to_owned(), cell.fg, cell.bg)
+                        })
+                    })
+                };
+                let close = hits
+                    .iter()
+                    .find(|h| h.action == buttons[0])
+                    .unwrap_or_else(|| panic!("{at}: close"))
+                    .area;
+                assert_eq!(close.height, 3, "{at}");
+                for action in buttons {
+                    let Some(hit) = hits.iter().find(|h| h.action == action) else {
+                        // Crowded: the engine and Contribute chips give way first.
+                        assert!(
+                            crowded && matches!(action, Click::Compute | Click::Play(_)),
+                            "{at}: {action:?} is missing"
+                        );
+                        continue;
+                    };
+                    assert_eq!(
+                        (hit.area.y, hit.area.width, hit.area.height),
+                        (close.y, close.width, close.height),
+                        "{at}: {action:?}"
+                    );
+                    assert_eq!(edges(hit.area), edges(close), "{at}: {action:?}");
+                    // The text row's two end cells: a pill's caps, the plate's fill or the
+                    // outline's sides (the text between them has its own color).
+                    let ends = |area: Rect| {
+                        [area.x, area.right() - 1].map(|x| {
+                            let cell = &buffer[(x, area.y + 1)];
+                            (cell.symbol().to_owned(), cell.bg)
+                        })
+                    };
+                    assert_eq!(ends(hit.area), ends(close), "{at}: {action:?}");
+                }
+                assert!(rendered_text(&term).contains("≡"), "{at}");
+            }
+        }
+        NERD_FOR_TEST.with(|n| n.set(None));
+        PHONE_LOOK.with(|o| o.set(false));
+        // Where the terminal draws pictures: every one of them three rows from the bar's top.
+        let mut picker = ratatui_image::picker::Picker::halfblocks();
+        picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+        GRAPHICS.with(|g| {
+            *g.borrow_mut() = Some(Graphics {
+                picker,
+                cache: std::collections::HashMap::new(),
+                dark: [29, 39, 52],
+                exact: true,
+            })
+        });
+        for width in [100, 160] {
+            let mut state = Screen::default();
+            state.status = Some(json!({
+                "compute": {"mode": "gpu", "gpu_available": true},
+                "components": {"schmooze": {"status": "configured-not-probed"}},
+            }));
+            state.model_switch = Some("Omnilingual".into());
+            let mut term =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
+            let mut hits = vec![];
+            term.draw(|f| hits = draw_plain(f, &state)).unwrap();
+            for (i, a) in hits.iter().enumerate() {
+                for b in &hits[i + 1..] {
+                    assert!(a.area.intersection(b.area).is_empty(), "{width}: overlap");
+                }
+            }
+            for action in buttons {
+                let hit = hits.iter().find(|h| h.action == action);
+                let hit = hit.unwrap_or_else(|| panic!("{width}: {action:?} is missing"));
+                assert_eq!((hit.area.y, hit.area.height), (1, 3), "{width}: {action:?}");
+            }
+        }
+        GRAPHICS.with(|g| *g.borrow_mut() = None);
+    }
+    #[test]
     fn engine_chip_shows_the_engine_and_switches_once() {
         let show = |state: &Screen, width: u16| {
             let mut term =
@@ -3948,22 +4285,22 @@ mod tests {
         // A service that says nothing about engines: no chip.
         state.status = Some(json!({"name": "3Yiddish"}));
         let (text, clickable) = show(&state, 80);
-        assert!(!clickable && !text.contains("GPU") && !text.contains("CPU"));
+        assert!(!clickable && !text.contains("▦") && !text.contains("▣"));
         for width in [62, 80, 160] {
             state.status = engine("gpu", true);
             let (text, clickable) = show(&state, width);
-            assert!(clickable && text.contains("GPU"), "{width}");
+            assert!(clickable && text.contains("▦"), "{width}");
             state.status = engine("cpu", true);
             let (text, clickable) = show(&state, width);
-            assert!(clickable && text.contains("CPU"), "{width}");
+            assert!(clickable && text.contains("▣"), "{width}");
             // No graphics card: the chip is there, and is not a button.
             state.status = engine("cpu", false);
             let (text, clickable) = show(&state, width);
-            assert!(!clickable && text.contains("CPU"), "{width}");
+            assert!(!clickable && text.contains("▣"), "{width}");
         }
         // Crowded: everything else keeps its place, with or without the chip.
         state.status = engine("gpu", true);
-        assert!(!show(&state, 40).0.contains("GPU"));
+        assert!(!show(&state, 40).0.contains("▦"));
         state.app_update = Some("9.9.9".into());
         state.model_update = Some("first".into());
         state.notice = "Could not hear anything.".into();
@@ -3982,7 +4319,7 @@ mod tests {
         assert_eq!(compute(&state), Some((false, true)));
         assert_eq!(switch_compute(&mut state), None);
         let (text, clickable) = show(&state, 100);
-        assert!(!clickable && text.contains("CPU"));
+        assert!(!clickable && text.contains("▣"));
         // Without a graphics card a click does nothing.
         state.compute_switch = None;
         state.status = engine("cpu", false);

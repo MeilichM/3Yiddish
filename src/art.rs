@@ -106,6 +106,124 @@ pub fn logo(accent: Rgb, record: Rgb) -> RgbaImage {
 /// A 12x12 icon: plus, mic, stop, send, refresh, phone or close.
 pub fn icon(name: &str, color: Rgb) -> RgbaImage {
     let rows: [&str; 12] = match name {
+        // A graphics card: its bracket, its fan and its connector.
+        "gpu" => [
+            "............",
+            "#...........",
+            "#.##########",
+            "#.#........#",
+            "#.#..####..#",
+            "#.#.##..##.#",
+            "#.#.##..##.#",
+            "#.#..####..#",
+            "#.#........#",
+            "#.##########",
+            "#....#.#.#..",
+            "#...........",
+        ],
+        // A processor: its core and its pins.
+        "cpu" => [
+            "....#..#....",
+            "....#..#....",
+            "..########..",
+            "..#......#..",
+            "###.####.###",
+            "..#.####.#..",
+            "..#.####.#..",
+            "###.####.###",
+            "..#......#..",
+            "..########..",
+            "....#..#....",
+            "....#..#....",
+        ],
+        // Contribute: giving.
+        "heart" => [
+            "............",
+            "..###..###..",
+            ".##########.",
+            "############",
+            "############",
+            "############",
+            ".##########.",
+            "..########..",
+            "...######...",
+            "....####....",
+            ".....##.....",
+            "............",
+        ],
+        // Chat: a speech bubble.
+        "chat" => [
+            "............",
+            ".##########.",
+            "############",
+            "##........##",
+            "##.##.##..##",
+            "##........##",
+            "############",
+            ".##########.",
+            "...###......",
+            "..###.......",
+            "..##........",
+            "............",
+        ],
+        // Transcribe: a written page.
+        "page" => [
+            ".########...",
+            ".#......##..",
+            ".#.####..#..",
+            ".#.......#..",
+            ".#.#####.#..",
+            ".#.......#..",
+            ".#.#####.#..",
+            ".#.......#..",
+            ".#.###...#..",
+            ".#.......#..",
+            ".#########..",
+            "............",
+        ],
+        "whisper" => [
+            "............",
+            "##...##...##",
+            "##...##...##",
+            "##...##...##",
+            "##...##...##",
+            "##..####..##",
+            "##..####..##",
+            "##.##..##.##",
+            "####....####",
+            "####....####",
+            "###......###",
+            "............",
+        ],
+        "omni" => [
+            "...######...",
+            "..########..",
+            ".###....###.",
+            "###......###",
+            "##........##",
+            "##........##",
+            "###......###",
+            ".###....###.",
+            "..###..###..",
+            "..###..###..",
+            "#####..#####",
+            "#####..#####",
+        ],
+        // Any other model: a stack.
+        "model" => [
+            "............",
+            ".##########.",
+            ".##########.",
+            "............",
+            "............",
+            ".##########.",
+            ".##########.",
+            "............",
+            "............",
+            ".##########.",
+            ".##########.",
+            "............",
+        ],
         "plus" => [
             "............",
             ".....##.....",
@@ -404,52 +522,6 @@ pub fn button(width: u32, height: u32, name: &str, color: Rgb, fill: Rgb) -> Rgb
     image
 }
 
-/// A chip's letters on a bar `height` pixels tall: their whole-number scale (about half the
-/// plate's height) and the width of the word.
-fn chip_word(height: u32, word: &str) -> (u32, u32) {
-    let scale = (height / 3 / 7).max(1);
-    let letters: u32 = word.chars().map(|l| glyph(l)[0].len() as u32 + 1).sum();
-    (scale, letters.saturating_sub(1) * scale)
-}
-
-/// How wide the engine chip's plate is at the least: the word and a quarter of the plate's
-/// height either side of it.
-pub fn chip_width(height: u32, word: &str) -> u32 {
-    chip_word(height, word).1 + height / 3
-}
-
-/// A word chip (the engine's "GPU" or "CPU", "CONTRIBUTE") in the logo's letters: a plate as tall and as round as
-/// the buttons beside it, `inset` pixels in from both sides of the canvas.
-pub fn chip(width: u32, height: u32, inset: u32, word: &str, color: Rgb, fill: Rgb) -> RgbaImage {
-    let tile = (height * 2 / 3) as f32;
-    let mut image = plate(
-        (width, height),
-        (inset as f32, (height as f32 - tile) / 2.0),
-        (width.saturating_sub(2 * inset) as f32, tile),
-        tile * 0.32,
-        fill,
-    );
-    let (scale, wide) = chip_word(height, word);
-    let mut x = width.saturating_sub(wide) / 2;
-    let y = height.saturating_sub(7 * scale) / 2;
-    for letter in word.chars() {
-        for (r, row) in glyph(letter).iter().enumerate() {
-            for (c, _) in row.chars().enumerate().filter(|(_, v)| *v == '#') {
-                for dy in 0..scale {
-                    for dx in 0..scale {
-                        let (px, py) = (x + c as u32 * scale + dx, y + r as u32 * scale + dy);
-                        if px < width && py < height {
-                            image.put_pixel(px, py, shade(color, 1.0));
-                        }
-                    }
-                }
-            }
-        }
-        x += (glyph(letter)[0].len() as u32 + 1) * scale;
-    }
-    image
-}
-
 /// The background of a piece of a fat bubble: three rows tall, filled in the middle two
 /// thirds (the text row plus half a row either side), clear above and below.
 fn band(width: u32, height: u32, background: Rgb) -> RgbaImage {
@@ -580,31 +652,12 @@ mod tests {
         let logo = super::logo([0, 255, 255], [255, 0, 0]);
         assert_eq!(logo.dimensions(), (86, 14));
         assert!(logo.pixels().any(|p| p[3] > 0));
-        for name in ["plus", "mic", "stop", "send", "refresh", "phone", "close"] {
+        for name in [
+            "plus", "mic", "stop", "send", "refresh", "phone", "close", "gpu", "cpu", "whisper",
+            "omni", "model",
+        ] {
             assert_eq!(super::icon(name, [255; 3]).dimensions(), (12, 12));
             assert_eq!(super::tile(name, [255; 3], 20).dimensions(), (20, 20));
         }
-    }
-    #[test]
-    fn chip_word_is_centered_inside_its_plate() {
-        // Cells of 10x22: a bar 66 tall, a plate 44 tall, letters three pixels to the dot.
-        let width = super::chip_width(66, "GPU") + 6;
-        assert_eq!(width, 79);
-        let (ink, fill) = ([1, 2, 3], [9, 9, 9]);
-        let chip = super::chip(80, 66, 3, "GPU", ink, fill);
-        let inked: Vec<(u32, u32)> = chip
-            .enumerate_pixels()
-            .filter(|(_, _, p)| p.0 == [1, 2, 3, 255])
-            .map(|(x, y, _)| (x, y))
-            .collect();
-        let xs = inked.iter().map(|p| p.0);
-        let ys = inked.iter().map(|p| p.1);
-        assert_eq!((xs.clone().min(), xs.max()), (Some(14), Some(64)));
-        assert_eq!((ys.clone().min(), ys.max()), (Some(22), Some(42)));
-        // The plate: clear above and beside, filled between.
-        assert_eq!(chip.get_pixel(40, 5)[3], 0);
-        assert_eq!(chip.get_pixel(1, 33)[3], 0);
-        assert_eq!(chip.get_pixel(4, 33).0, [9, 9, 9, 255]);
-        assert_ne!(super::chip(80, 66, 3, "CPU", ink, fill), chip);
     }
 }

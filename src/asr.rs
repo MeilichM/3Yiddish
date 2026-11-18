@@ -180,9 +180,114 @@ pub fn remember_at(file: &Path, compute: Compute) -> Result<()> {
     Ok(())
 }
 
-pub struct Engine {
+/// How one model wants to be run (from its `model.json`; see `model::settings`).
+#[derive(Clone, Debug, Default)]
+pub struct Settings {
+    /// Write plain text, without time marks (for a model trained that way).
+    pub plain_text: bool,
+    /// How hard the word check pushes; 0 is off.
+    pub word_weight: f32,
+    /// The word list for the word check.
+    pub words: Option<PathBuf>,
+    /// Stop a phrase from being written a third time in a row.
+    pub loop_guard: bool,
+    /// The model is an Omnilingual one (ONNX) rather than a Whisper one; `letters` is its
+    /// letter table.
+    pub omnilingual: bool,
+    pub letters: Option<PathBuf>,
+}
+
+impl Settings {
+    /// The model's own settings, with the environment on top (for checks):
+    /// `THREE_YIDDISH_TIMESTAMPS=0|1`, `THREE_YIDDISH_WORDS=<file>`,
+    /// `THREE_YIDDISH_WORD_WEIGHT=<number>`, `THREE_YIDDISH_LOOP_GUARD=0|1`.
+    fn with_env(mut self) -> Self {
+        let var = |name: &str| std::env::var(name).ok();
+        if let Some(v) = var("THREE_YIDDISH_TIMESTAMPS") {
+            self.plain_text = v == "0";
+        }
+        if let Some(v) = var("THREE_YIDDISH_WORDS") {
+            self.words = Some(PathBuf::from(v));
+        }
+        if let Some(v) = var("THREE_YIDDISH_WORD_WEIGHT").and_then(|v| v.parse().ok()) {
+            self.word_weight = v;
+        }
+        if let Some(v) = var("THREE_YIDDISH_LOOP_GUARD") {
+            self.loop_guard = v != "0";
+        }
+        self
+    }
+}
+
+/// The loaded Transcribe model, whichever kind it is.
+pub struct Engine(Kind);
+
+enum Kind {
+    Whisper(Whisper),
+    #[cfg(feature = "omni")]
+    Omni(crate::omni::Engine),
+}
+
+impl Engine {
+    /// Load the model for `compute`, run the way its `model.json` says. A GPU that cannot be
+    /// used falls back to the CPU (here or on the first transcription) so the request still
+    /// succeeds; `compute()` tells which one the engine ended up on.
+    pub fn load(model: &Path, vad: Option<&Path>, compute: Compute) -> Result<Self> {
+        let settings = crate::model::settings(model).with_env();
+        let words = match &settings.words {
+            Some(file) if settings.word_weight > 0.0 => Some(
+                std::fs::read_to_string(file)
+                    .with_context(|| format!("Cannot read the word list {}", file.display()))?,
+            ),
+            _ => None,
+        };
+        if settings.omnilingual {
+            #[cfg(feature = "omni")]
+            {
+                let letters = settings
+                    .letters
+                    .as_deref()
+                    .context("This model came without its letter table")?;
+                return Ok(Self(Kind::Omni(crate::omni::Engine::load(
+                    model,
+                    letters,
+                    words.as_deref(),
+                    settings.word_weight,
+                )?)));
+            }
+            #[cfg(not(feature = "omni"))]
+            bail!("This build of 3Yiddish cannot run this kind of model");
+        }
+        Ok(Self(Kind::Whisper(Whisper::load(
+            model, vad, compute, &settings, words,
+        )?)))
+    }
+
+    /// What the engine runs on now (CPU after a GPU fallback).
+    pub fn compute(&self) -> Compute {
+        match &self.0 {
+            Kind::Whisper(w) => w.compute(),
+            #[cfg(feature = "omni")]
+            Kind::Omni(_) => Compute::Cpu,
+        }
+    }
+
+    /// 16 kHz mono samples in, Yiddish text out.
+    pub fn transcribe(&self, pcm: &[f32]) -> Result<String> {
+        match &self.0 {
+            Kind::Whisper(w) => w.transcribe(pcm),
+            #[cfg(feature = "omni")]
+            Kind::Omni(o) => o.transcribe(pcm),
+        }
+    }
+}
+
+struct Whisper {
     model: PathBuf,
     vad: Option<String>,
+    plain_text: bool,
+    /// The word check and loop guard, when the model asks for either.
+    check: Option<crate::wordcheck::Check>,
     // whisper.cpp states are heavy; one transcription at a time per engine. The lock also
     // lets a GPU context that fails on first use be swapped for a CPU one.
     loaded: Mutex<Loaded>,
@@ -215,11 +320,14 @@ fn report_gpu_failure(error: &anyhow::Error) {
     eprintln!("3Yiddish: the GPU could not be used ({error:#}); using the CPU instead.");
 }
 
-impl Engine {
-    /// Load the model for `compute`. A GPU that cannot be used falls back to the CPU (here or
-    /// on the first transcription) so the request still succeeds; `compute()` tells which one
-    /// the engine ended up on.
-    pub fn load(model: &Path, vad: Option<&Path>, compute: Compute) -> Result<Self> {
+impl Whisper {
+    fn load(
+        model: &Path,
+        vad: Option<&Path>,
+        compute: Compute,
+        settings: &Settings,
+        words: Option<String>,
+    ) -> Result<Self> {
         whisper_rs::install_logging_hooks(); // route whisper.cpp's console spam to (silent) log
         let gpu = compute == Compute::Gpu && gpu_usable();
         let (ctx, gpu) = match context(model, gpu) {
@@ -231,9 +339,30 @@ impl Engine {
             }
             loaded => (loaded?, gpu),
         };
+        let check = (words.is_some() || settings.loop_guard).then(|| {
+            // Control marks (the end of the text and everything after it) get no bytes.
+            let pieces = (0..ctx.n_vocab())
+                .map(|id| match ctx.token_to_bytes(id) {
+                    Ok(bytes) if id < ctx.token_eot() => bytes.to_vec(),
+                    _ => Vec::new(),
+                })
+                .collect();
+            crate::wordcheck::Check::new(
+                words.as_deref().unwrap_or_default(),
+                pieces,
+                if words.is_some() {
+                    settings.word_weight
+                } else {
+                    0.0
+                },
+                settings.loop_guard,
+            )
+        });
         Ok(Self {
             model: model.to_owned(),
             vad: vad.map(|p| p.to_string_lossy().into_owned()),
+            plain_text: settings.plain_text,
+            check,
             loaded: Mutex::new(Loaded {
                 ctx,
                 unproven_gpu: gpu,
@@ -242,8 +371,7 @@ impl Engine {
         })
     }
 
-    /// What the engine runs on now (CPU after a GPU fallback).
-    pub fn compute(&self) -> Compute {
+    fn compute(&self) -> Compute {
         if self.gpu.load(Ordering::Relaxed) {
             Compute::Gpu
         } else {
@@ -251,8 +379,7 @@ impl Engine {
         }
     }
 
-    /// 16 kHz mono samples in, Yiddish text out.
-    pub fn transcribe(&self, pcm: &[f32]) -> Result<String> {
+    fn transcribe(&self, pcm: &[f32]) -> Result<String> {
         let mut loaded = self
             .loaded
             .lock()
@@ -289,6 +416,20 @@ impl Engine {
         });
         p.set_language(Some("yi"));
         p.set_no_context(true);
+        // A model trained to write text without time marks writes junk where the first mark
+        // would go, so it is asked for plain text.
+        p.set_no_timestamps(self.plain_text);
+        if let Some(check) = &self.check {
+            // SAFETY: `check` lives in `self`, which outlives `state.full` below, the only
+            // place the callback runs; it is only read there, so the decoder's threads may
+            // share it.
+            unsafe {
+                p.set_filter_logits_callback(Some(filter_logits));
+                p.set_filter_logits_callback_user_data(
+                    check as *const crate::wordcheck::Check as *mut std::ffi::c_void,
+                );
+            }
+        }
         p.set_print_progress(false);
         p.set_print_realtime(false);
         p.set_print_special(false);
@@ -312,8 +453,36 @@ impl Engine {
     }
 }
 
+/// whisper.cpp calls this before it picks each next piece of text.
+unsafe extern "C" fn filter_logits(
+    ctx: *mut whisper_rs::WhisperSysContext,
+    _state: *mut whisper_rs::WhisperSysState,
+    tokens: *const whisper_rs::WhisperTokenData,
+    n_tokens: std::ffi::c_int,
+    logits: *mut f32,
+    user_data: *mut std::ffi::c_void,
+) {
+    if tokens.is_null() && n_tokens > 0 || logits.is_null() || user_data.is_null() {
+        return;
+    }
+    // SAFETY: whisper.cpp hands over `n_tokens` tokens and one score per piece of its
+    // vocabulary; `user_data` is the `Check` set in `Engine::run`.
+    unsafe {
+        let check = &*(user_data as *const crate::wordcheck::Check);
+        let written: Vec<i32> = (0..n_tokens.max(0) as usize)
+            .map(|i| (*tokens.add(i)).id)
+            .collect();
+        let n_vocab = whisper_n_vocab(ctx).max(0) as usize;
+        check.filter(&written, std::slice::from_raw_parts_mut(logits, n_vocab));
+    }
+}
+
+unsafe extern "C" {
+    fn whisper_n_vocab(ctx: *mut whisper_rs::WhisperSysContext) -> std::ffi::c_int;
+}
+
 /// Threads for whisper.cpp: `$THREE_YIDDISH_THREADS`, else most of the cores (leave two free).
-fn threads() -> i32 {
+pub(crate) fn threads() -> i32 {
     std::env::var("THREE_YIDDISH_THREADS")
         .ok()
         .and_then(|t| t.parse().ok())
