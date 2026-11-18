@@ -278,11 +278,17 @@ impl Engine {
         if !loud_enough(pcm) {
             return Ok(String::new());
         }
-        match &self.0 {
+        let text = match &self.0 {
             Kind::Whisper(w) => w.transcribe(pcm),
             #[cfg(feature = "omni")]
             Kind::Omni(o) => o.transcribe(pcm),
-        }
+        }?;
+        // A lone mark (".") on noise is nothing heard.
+        Ok(if text.chars().any(char::is_alphanumeric) {
+            text
+        } else {
+            String::new()
+        })
     }
 }
 

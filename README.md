@@ -23,13 +23,14 @@ curl -fsSL https://github.com/TripleU613/3Yiddish/releases/latest/download/insta
 irm https://github.com/TripleU613/3Yiddish/releases/latest/download/install.ps1 | iex
 ```
 
-That's it. It downloads itself, checks it isn't broken, and grabs the speech models
-(about 1.6 GB for the two of them, one time; go make a coffee). On a phone or an Intel Mac
-it is one model, about 600 MB.
+That's it. It installs in seconds. The first time you open it, it asks whether to
+download the speech model (about 575 MB, one time; go make a coffee) and shows the
+download as it goes.
 
 **Two models, one button.** Both are our own, trained on heimish Yiddish: one built on
 OpenAI's Whisper, one built on Meta's Omnilingual. They make different mistakes, so if one
-gets a recording wrong, click the model button at the top and try the other. The
+gets a recording wrong, click the model button at the top and try the other. The second
+one is downloaded only when you ask for it (about 1 GB). The
 Whisper-based one is the default and can use a graphics card; the Omnilingual-based one
 runs on the processor.
 

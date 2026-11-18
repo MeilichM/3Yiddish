@@ -81,6 +81,5 @@ if (($path -split ';') -notcontains $dir) {
   $env:Path += ";$dir"
 }
 Write-Host "Installed: $exe"
-if ($env:THREE_YIDDISH_SKIP_MODEL) { return }
-& $exe model pull
+Write-Host 'The first time it opens, it asks to download the speech model.'
 Write-Host 'Start it with: 3yiddish'

@@ -14,7 +14,7 @@
    "sha256": "e3ad1610f100cbcd659db40a02268dc35c5d39cea608922c4f00645d84c727c6"
   }
  ],
- "min_app_version": "0.4.0",
+ "min_app_version": "0.5.0",
  "scores": {
   "wrong_words_per_100": 16.0,
   "benchmark_score": 58.0

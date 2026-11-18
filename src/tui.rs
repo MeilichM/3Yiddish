@@ -31,6 +31,10 @@ enum Update {
     Available(Option<String>, Option<String>),
     /// Progress or result of an app/model update, shown as the notice line.
     Upgrade(String, bool),
+    /// The models that can be picked (published or on disk), found in the background.
+    Catalog(Vec<crate::model::Listing>),
+    /// A model download under way: its name, bytes done and bytes in all.
+    Progress(String, u64, u64),
     /// An audio file chosen with the attach button (None: cancelled or no picker).
     Picked(Option<String>),
     /// A finished take: its file, length in seconds and loudness over time (for the voice
@@ -229,8 +233,14 @@ struct Screen {
     /// Updates found at startup (app version, model label) and whether one is running.
     app_update: Option<String>,
     model_update: Option<String>,
-    /// The active model's name, when more than one is installed and a click can switch.
+    /// The active model's name, when there is more than one to pick and a click can switch.
     model_switch: Option<String>,
+    /// The models that can be picked: published, or on disk.
+    catalog: Vec<crate::model::Listing>,
+    /// The question to download the model at this place in `catalog`.
+    model_card: Option<usize>,
+    /// A model download under way: its name, bytes done and bytes in all.
+    progress: Option<(String, u64, u64)>,
     /// Termux with the phone's own font: offer the font in which Yiddish letters read well.
     font_offer: bool,
     upgrading: bool,
@@ -562,8 +572,12 @@ enum Click {
     Record,
     UpdateApp,
     UpdateModel,
-    /// Use the next installed model.
+    /// Use the next model (asking to download it first when it is not here).
     SwitchModel,
+    /// Download the model at this place in the list, from its question.
+    GetModel(usize),
+    /// Leave the download question.
+    ModelNotNow,
     /// Chat, or write down what is said.
     Mode,
     GetFont,
@@ -609,11 +623,14 @@ fn switch_compute(state: &mut Screen) -> Option<bool> {
     Some(!gpu)
 }
 /// The active model's name for the switch chip; None with fewer than two models installed.
-fn model_switch_label() -> Option<String> {
+/// The name of the model in use, when there is more than one to pick from (on disk or
+/// published): then the model button shows it.
+fn model_switch_label(catalog: &[crate::model::Listing]) -> Option<String> {
     let root = crate::paths::models();
     let all = crate::model::installed(&root);
     let now = crate::model::current(&root)?.0;
-    (all.len() > 1).then(|| {
+    let choices = catalog.len().max(all.len());
+    (choices > 1).then(|| {
         all.into_iter()
             .find(|(v, _)| *v == now)
             .map(|(_, label)| label)
@@ -682,6 +699,17 @@ async fn chat(
         .and_then(Value::as_str)
         .context("No reply")?;
     Ok(json!({"text": reply}))
+}
+/// "Downloading the Whisper-based model ▕██████░░░░░░░░░░▏ 37%".
+fn progress_bar(label: &str, done: u64, total: u64) -> String {
+    let share = (done as f64 / total.max(1) as f64).clamp(0.0, 1.0);
+    let filled = (share * 16.0).round() as usize;
+    format!(
+        "Downloading the {label}-based model ▕{}{}▏ {}%",
+        "█".repeat(filled),
+        "░".repeat(16 - filled),
+        (share * 100.0) as u32
+    )
 }
 /// What there is to get, most needed first, with the words the bar shows for it: the first
 /// model (nothing works without it), a new version of the app, a newer model, the font.
@@ -1001,9 +1029,12 @@ fn terminal(
                 .map(|_| "new".to_owned())
         };
         let _ = check_tx.send(Update::Available(app, model));
+        let _ = check_tx.send(Update::Catalog(crate::model::catalog(
+            &crate::paths::models(),
+        )));
     });
     let mut state = Screen {
-        model_switch: model_switch_label(),
+        model_switch: model_switch_label(&[]),
         ..Screen::default()
     };
     let mut playground_view = None;
@@ -1111,6 +1142,19 @@ fn terminal(
                     state.app_update = app;
                     state.model_update = model;
                 }
+                Update::Catalog(list) => {
+                    // Nothing to transcribe with yet: the first thing asked is whether to
+                    // download the model (after the sharing question, if that is up).
+                    let none = crate::model::current(&crate::paths::models()).is_none();
+                    if none && list.first().is_some_and(|m| !m.installed) {
+                        state.model_card = Some(0);
+                    }
+                    state.catalog = list;
+                    state.model_switch = model_switch_label(&state.catalog);
+                }
+                Update::Progress(label, done, total) => {
+                    state.progress = Some((label, done, total));
+                }
                 Update::Upgrade(text, finished) => {
                     state.notice = text;
                     // The same words again (a second try) stay up for their full time.
@@ -1118,8 +1162,9 @@ fn terminal(
                     if finished {
                         state.upgrading = false;
                         state.restart_due |= state.notice.starts_with("Updated to");
+                        state.progress = None;
                         // A second model may have arrived: its switch button shows at once.
-                        state.model_switch = model_switch_label();
+                        state.model_switch = model_switch_label(&state.catalog);
                     }
                 }
                 Update::Play(answer) => playground::answer(&mut state, answer, &play_jobs),
@@ -1358,6 +1403,30 @@ fn terminal(
             };
             if let Some(answer) = answer {
                 playground::click(&mut state, answer, &play_jobs)?;
+                continue;
+            }
+        }
+        // The download question: Enter downloads, Esc is Not now; nothing is typed.
+        if let Some(index) = state.model_card
+            && state.share_card.is_none()
+            && !recording(&state)
+        {
+            let control = key.modifiers.contains(KeyModifiers::CONTROL);
+            let answer = match key.code {
+                KeyCode::Enter => Click::GetModel(index),
+                KeyCode::Esc => Click::ModelNotNow,
+                KeyCode::Char('r' | 'c') if control => Click::Key(KeyCode::Null),
+                _ => continue,
+            };
+            if answer != Click::Key(KeyCode::Null) {
+                click(
+                    &mut state,
+                    answer,
+                    &tx,
+                    &compute_actions,
+                    &pair_actions,
+                    &play_jobs,
+                )?;
                 continue;
             }
         }
@@ -1641,14 +1710,22 @@ fn click(
             state.app_update = None;
             return Ok(None);
         }
+        Click::UpdateModel
+            if state.model_update.as_deref() == Some("first")
+                && state.catalog.first().is_some_and(|m| !m.installed) =>
+        {
+            state.model_card = Some(0);
+            return Ok(None);
+        }
         Click::UpdateModel => {
             state.upgrading = true;
             let tx = tx.clone();
             let label = state.model_update.take();
             std::thread::spawn(move || {
                 let mut last = 101;
-                let result =
-                    crate::model::pull(&crate::paths::models(), &mut |name, done, total| {
+                let result = crate::model::pull_updates(
+                    &crate::paths::models(),
+                    &mut |name, done, total| {
                         let pct = done * 100 / total.max(1);
                         if pct != last {
                             last = pct;
@@ -1657,7 +1734,8 @@ fn click(
                                 false,
                             ));
                         }
-                    });
+                    },
+                );
                 let text = match result {
                     Ok(v) => format!("Model {v} is installed and active."),
                     Err(e) => {
@@ -1679,11 +1757,68 @@ fn click(
             .into();
             return Ok(None);
         }
+        Click::SwitchModel if !state.catalog.is_empty() => {
+            let root = crate::paths::models();
+            let now = crate::model::current(&root).map(|(v, ..)| v);
+            let at = state
+                .catalog
+                .iter()
+                .position(|m| Some(&m.version) == now.as_ref());
+            let next = at.map_or(0, |i| (i + 1) % state.catalog.len());
+            let pick = state.catalog[next].clone();
+            if pick.installed {
+                match crate::model::use_version(&root, &pick.version) {
+                    Ok(()) => {
+                        state.notice = format!("Now using our {}-based model.", pick.label);
+                        state.model_switch = model_switch_label(&state.catalog);
+                    }
+                    Err(e) => state.notice = crate::model::plain_error(&e),
+                }
+            } else {
+                state.model_card = Some(next);
+            }
+            return Ok(None);
+        }
+        Click::ModelNotNow => {
+            state.model_card = None;
+            return Ok(None);
+        }
+        Click::GetModel(index) => {
+            state.model_card = None;
+            let Some(pick) = state.catalog.get(index).cloned() else {
+                return Ok(None);
+            };
+            state.upgrading = true;
+            state.progress = Some((pick.label.clone(), 0, pick.size));
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let root = crate::paths::models();
+                // The download goes file by file; the bar shows the whole model.
+                let (mut base, mut file, mut last) = (0u64, String::new(), (0u64, 0u64));
+                let result =
+                    crate::model::pull_one(&root, &pick.version, &mut |name, done, total| {
+                        if name != file {
+                            base += last.1;
+                            file = name.to_owned();
+                        }
+                        last = (done, total);
+                        let _ =
+                            tx.send(Update::Progress(pick.label.clone(), base + done, pick.size));
+                    });
+                let text = match result {
+                    Ok(_) => format!("Now using our {}-based model.", pick.label),
+                    Err(e) => crate::model::plain_error(&e),
+                };
+                let _ = tx.send(Update::Catalog(crate::model::catalog(&root)));
+                let _ = tx.send(Update::Upgrade(text, true));
+            });
+            return Ok(None);
+        }
         Click::SwitchModel => {
             match crate::model::switch_next(&crate::paths::models()) {
                 Ok((_, label)) => {
                     state.notice = format!("Now using our {label}-based model.");
-                    state.model_switch = model_switch_label();
+                    state.model_switch = model_switch_label(&state.catalog);
                 }
                 Err(e) => state.notice = crate::model::plain_error(&e),
             }
@@ -3048,12 +3183,18 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
     // With nothing else to say, the bar says what the download button is offering.
     let hint = offer(state)
         .filter(|_| state.notice.is_empty() && !active && !state.busy)
-        .map(|(_, words)| words);
+        .map(|(_, words)| words.to_owned());
+    // A model on its way: a bar, filling as it comes, in place of any other words.
+    let hint = state
+        .progress
+        .as_ref()
+        .map(|(label, done, total)| progress_bar(label, *done, *total))
+        .or(hint);
     if !state.notice.is_empty() || hint.is_some() {
         let left = logo_end;
         let right = x.saturating_sub(status_w + 2);
-        let notice = match hint {
-            Some(words) => words.to_owned(),
+        let notice = match &hint {
+            Some(words) => words.clone(),
             None => clean(&state.notice).replace('\n', " "),
         };
         let length = notice.chars().count() as u16;
@@ -3102,6 +3243,26 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
         playground::draw_share(
             frame,
             card,
+            Rect::new(
+                area.x,
+                top,
+                area.width,
+                screen.height.saturating_sub(top + 1),
+            ),
+            &mut hits,
+        );
+        return hits;
+    }
+    if let Some(model) = state
+        .model_card
+        .and_then(|i| state.catalog.get(i).map(|m| (i, m)))
+    {
+        let top = area.y + 4;
+        let first = !state.catalog.iter().any(|m| m.installed);
+        playground::draw_model_card(
+            frame,
+            model,
+            first,
             Rect::new(
                 area.x,
                 top,
@@ -4164,6 +4325,57 @@ mod tests {
         assert!(!again.chat);
         assert_eq!(again.plain_log, vec![(false, "written down".to_owned())]);
         assert_eq!(again.input, "a draft");
+    }
+    #[test]
+    fn a_model_is_downloaded_only_after_saying_yes() {
+        let listing = |version: &str, label: &str, size: u64, installed| crate::model::Listing {
+            version: version.into(),
+            label: label.into(),
+            size,
+            installed,
+        };
+        let draw = |state: &Screen| {
+            let mut term =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+            let mut hits = vec![];
+            term.draw(|f| hits = draw_plain(f, state)).unwrap();
+            (rendered_text(&term), hits)
+        };
+        // First open, nothing here: the question names the model and its size.
+        let mut state = Screen::default();
+        state.catalog = vec![
+            listing("w", "Whisper", 575_000_000, false),
+            listing("o", "Omnilingual", 1_032_000_000, false),
+        ];
+        state.model_card = Some(0);
+        let (text, hits) = draw(&state);
+        assert!(text.contains("Download the speech model?"), "{text}");
+        assert!(text.contains("about 575 MB"), "{text}");
+        assert!(hits.iter().any(|h| h.action == Click::GetModel(0)));
+        assert!(hits.iter().any(|h| h.action == Click::ModelNotNow));
+        // The other model, asked for with the model button.
+        state.catalog[0].installed = true;
+        state.model_card = Some(1);
+        let (text, hits) = draw(&state);
+        assert!(
+            text.contains("Download our Omnilingual-based model?"),
+            "{text}"
+        );
+        assert!(text.contains("about 1032 MB"), "{text}");
+        assert!(hits.iter().any(|h| h.action == Click::GetModel(1)));
+        // While it downloads, the bar fills in the middle of the top bar.
+        state.model_card = None;
+        state.progress = Some(("Omnilingual".into(), 516_000_000, 1_032_000_000));
+        let (text, _) = draw(&state);
+        assert!(
+            text.contains("Downloading the Omnilingual-based model"),
+            "{text}"
+        );
+        assert!(text.contains("50%"), "{text}");
+        assert_eq!(
+            progress_bar("Whisper", 1, 4),
+            "Downloading the Whisper-based model ▕████░░░░░░░░░░░░▏ 25%"
+        );
     }
     #[test]
     fn the_refresh_button_offers_what_there_is_to_get() {

@@ -2902,6 +2902,53 @@ pub(super) fn draw_consent(frame: &mut Frame, region: Rect, hits: &mut Vec<Hit>)
 }
 /// The sharing card: the first-run question (No thanks is the main button: the default is
 /// no), or what is being shared with Stop sharing.
+/// The question to download a model: the first one (nothing works without it), or another
+/// one asked for with the model button.
+pub(super) fn draw_model_card(
+    frame: &mut Frame,
+    (index, model): (usize, &crate::model::Listing),
+    first: bool,
+    region: Rect,
+    hits: &mut Vec<Hit>,
+) {
+    let size = format!("about {} MB", (model.size / 1_000_000).max(1));
+    let (title, text) = if first {
+        (
+            "Download the speech model?".to_owned(),
+            format!(
+                "To write down what you say, the app needs its speech model: our {}-based one, {size}. It is free, it is downloaded once, and it stays on this computer.",
+                model.label
+            ),
+        )
+    } else {
+        let why = if model.label == "Omnilingual" {
+            " It runs on the processor and makes different mistakes than the Whisper-based model, so it is worth a try when that one gets something wrong."
+        } else {
+            ""
+        };
+        (
+            format!("Download our {}-based model?", model.label),
+            format!("It is {size}, free, and stays on this computer.{why}"),
+        )
+    };
+    question(
+        frame,
+        region,
+        hits,
+        &title,
+        (&[], &[text.as_str()]),
+        [
+            (Line::from("Not now"), surface(), Click::ModelNotNow, true),
+            (
+                Line::from("Download"),
+                THEME_ACCENT,
+                Click::GetModel(index),
+                true,
+            ),
+        ],
+    );
+}
+
 pub(super) fn draw_share(frame: &mut Frame, card: ShareCard, region: Rect, hits: &mut Vec<Hit>) {
     match card {
         ShareCard::Ask => question(

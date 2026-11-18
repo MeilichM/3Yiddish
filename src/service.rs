@@ -493,7 +493,14 @@ impl App {
         // One sentence at a time: the translator keeps a short sentence whole, where a long
         // answer comes back with pieces run together.
         let mut text = Vec::new();
-        for sentence in sentences(&answer.text) {
+        // An answer already in Yiddish (the thinker sometimes answers in kind) is kept as it
+        // is, not translated a second time.
+        let already = has_yiddish_script(&answer.text)
+            && !answer.text.contains(|c: char| c.is_ascii_alphabetic());
+        if already {
+            text.push(heimish_spelling(&answer.text));
+        }
+        for sentence in sentences(&answer.text).into_iter().filter(|_| !already) {
             let translated = self.translate(sentence, "en-yi").await?;
             calls.push(
                 json!({"stage":"output_translation","model":translated.model,"usage":translated.usage}),

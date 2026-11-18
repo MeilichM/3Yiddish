@@ -255,10 +255,120 @@ fn complete(root: &Path, manifest: &Manifest) -> bool {
         })
 }
 
-/// Is there a published model this build can run that is not on disk yet? The model in use
-/// does not decide it: someone using the second model has nothing to get.
+/// The kinds of model on disk (None: Whisper).
+fn kinds(root: &Path) -> Vec<Option<String>> {
+    std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| manifest_of(&entry.path()))
+        .map(|m| m.engine)
+        .collect()
+}
+
+/// Is there a newer version of a kind of model already on disk? A model nobody downloaded
+/// is not an update: it is offered when someone asks for it.
 pub fn wanted(root: &Path) -> Result<bool> {
-    Ok(published()?.1.iter().any(|m| !complete(root, m)))
+    let have = kinds(root);
+    Ok(published()?
+        .1
+        .iter()
+        .any(|m| have.contains(&m.engine) && !complete(root, m)))
+}
+
+/// A model that can be picked in the app: published, or already on disk.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Listing {
+    pub version: String,
+    /// The name shown in the app.
+    pub label: String,
+    /// Bytes to download (all of its files).
+    pub size: u64,
+    pub installed: bool,
+}
+
+/// Every model this build can run, published or on disk, the main published one first.
+/// Without a connection, only what is on disk.
+pub fn catalog(root: &Path) -> Vec<Listing> {
+    let on_disk = installed(root);
+    let mut list: Vec<Listing> = published()
+        .map(|(_, all)| all)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| Listing {
+            installed: complete(root, &m),
+            label: m.label.clone().unwrap_or_else(|| m.version.clone()),
+            size: m.files.iter().map(|f| f.size).sum(),
+            version: m.version,
+        })
+        .collect();
+    for (version, label) in on_disk {
+        if !list.iter().any(|l| l.version == version) {
+            list.push(Listing {
+                version,
+                label,
+                size: 0,
+                installed: true,
+            });
+        }
+    }
+    list
+}
+
+/// Make an installed model the active one.
+pub fn use_version(root: &Path, version: &str) -> Result<()> {
+    if !installed(root).iter().any(|(v, _)| v == version) {
+        bail!("That model is not on this computer");
+    }
+    activate(root, version)
+}
+
+/// Download one published model and make it the active one.
+pub fn pull_one(
+    root: &Path,
+    version: &str,
+    progress: &mut dyn FnMut(&str, u64, u64),
+) -> Result<String> {
+    let (base, all) = published()?;
+    if !all.iter().any(|m| m.version == version) {
+        bail!("That model is no longer published; try again later");
+    }
+    install(
+        root,
+        &all,
+        Some(&|m: &Manifest| m.version == version),
+        &mut |file, part, progress| {
+            download(&format!("{base}/{}", file.name), part, file.size, progress)
+        },
+        progress,
+    )?;
+    // Asked for by name: it is the one wanted now.
+    activate(root, version)?;
+    Ok(version.to_owned())
+}
+
+/// Download the newer versions of the kinds of model on disk (the main one when there is
+/// none yet), keeping the model in use where it is still published.
+pub fn pull_updates(root: &Path, progress: &mut dyn FnMut(&str, u64, u64)) -> Result<String> {
+    let (base, all) = published()?;
+    let have = kinds(root);
+    let main = all.first().map(|m| m.version.clone());
+    let pick = |m: &Manifest| {
+        if have.is_empty() {
+            Some(&m.version) == main.as_ref()
+        } else {
+            have.contains(&m.engine)
+        }
+    };
+    install(
+        root,
+        &all,
+        Some(&pick),
+        &mut |file, part, progress| {
+            download(&format!("{base}/{}", file.name), part, file.size, progress)
+        },
+        progress,
+    )
 }
 
 /// Check GitHub for published models that are not here; download and verify them. A new
@@ -271,6 +381,7 @@ pub fn pull(root: &Path, progress: &mut dyn FnMut(&str, u64, u64)) -> Result<Str
     install(
         root,
         &all,
+        None,
         &mut |file, part, progress| {
             download(&format!("{base}/{}", file.name), part, file.size, progress)
         },
@@ -281,10 +392,15 @@ pub fn pull(root: &Path, progress: &mut dyn FnMut(&str, u64, u64)) -> Result<Str
 /// Gets one file of a model into the given place, reporting the bytes done.
 type Fetch<'a> = &'a mut dyn FnMut(&File, &Path, &mut dyn FnMut(u64)) -> Result<()>;
 
+/// Which of the published models to download; None: all of them.
+type Pick<'a> = Option<&'a dyn Fn(&Manifest) -> bool>;
+
 /// Put the published models `all` (main one first) on disk, getting each file with `fetch`.
+/// With `pick`, only the models it picks.
 fn install(
     root: &Path,
     all: &[Manifest],
+    pick: Pick,
     fetch: Fetch,
     progress: &mut dyn FnMut(&str, u64, u64),
 ) -> Result<String> {
@@ -302,7 +418,8 @@ fn install(
     std::fs::create_dir_all(root)?;
     let versions: Vec<&str> = all.iter().map(|m| m.version.as_str()).collect();
     write_atomic(&root.join("index"), &versions.join("\n"))?;
-    for manifest in all {
+    let chosen: Vec<&Manifest> = all.iter().filter(|m| pick.is_none_or(|p| p(m))).collect();
+    for &manifest in &chosen {
         let dir = root.join(&manifest.version);
         if !complete(root, manifest) {
             std::fs::create_dir_all(&dir)?;
@@ -561,6 +678,7 @@ mod tests {
         let active = install(
             root,
             all,
+            None,
             &mut |file, part, _| {
                 fetched += 1;
                 Ok(std::fs::write(part, file.name.trim_end_matches(".bin"))?)
@@ -611,10 +729,28 @@ mod tests {
         let result = install(
             &empty,
             &third,
+            None,
             &mut |_, part, _| Ok(std::fs::write(part, "something else")?),
             &mut |_, _, _| {},
         );
         assert!(result.is_err() && current(&empty).is_none());
+        // Picking one model downloads only that one; the rest stay published, not fetched.
+        let picked = root.join("picked");
+        let mut fetched = 0;
+        install(
+            &picked,
+            &second,
+            Some(&|m: &Manifest| m.engine.is_none()),
+            &mut |file, part, _| {
+                fetched += 1;
+                Ok(std::fs::write(part, file.name.trim_end_matches(".bin"))?)
+            },
+            &mut |_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(fetched, 1);
+        assert!(root.join("picked/w2").is_dir() && !root.join("picked/o2").exists());
+        assert_eq!(kinds(&picked), vec![None]);
         std::fs::remove_dir_all(root).unwrap();
     }
 }
