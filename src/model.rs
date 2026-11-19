@@ -484,6 +484,10 @@ fn tidy(root: &Path) {
     let mut keep = listed(root);
     keep.extend(read("current"));
     keep.extend(read("previous"));
+    // Each kind of model keeps its two newest versions, so each can be rolled back on its own.
+    for versions in by_kind(root).into_values() {
+        keep.extend(versions.into_iter().take(2));
+    }
     for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let local = manifest_of(&entry.path()).is_some_and(|m| m.local);
@@ -491,6 +495,94 @@ fn tidy(root: &Path) {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
+}
+
+/// For ordering versions: the numbers in it ("2026.11.18-omni" is 2026, 11, 18).
+fn version_key(version: &str) -> Vec<u64> {
+    version
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.parse().unwrap_or(0))
+        .collect()
+}
+
+/// The published-kind models on disk, complete and runnable here, by kind (the engine name,
+/// "whisper" for Whisper), newest version first. Models put here by hand are left out.
+fn by_kind(root: &Path) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut kinds: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let Some(m) = manifest_of(&entry.path()) else {
+            continue;
+        };
+        if m.local || !runs_here(&m) || !complete(root, &m) {
+            continue;
+        }
+        let kind = m.engine.clone().unwrap_or_else(|| "whisper".into());
+        kinds.entry(kind).or_default().push(m.version);
+    }
+    for versions in kinds.values_mut() {
+        versions.sort_by_key(|v| std::cmp::Reverse(version_key(v)));
+    }
+    kinds
+}
+
+/// One kind of model on this computer, as Settings shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Family {
+    /// "Whisper" or "Omnilingual".
+    pub label: String,
+    /// The version of it in use: the active one when this kind is active, else the newest.
+    pub version: String,
+    /// The version Roll back goes to: the newest one before it, if still on disk.
+    pub older: Option<String>,
+    pub active: bool,
+}
+
+/// Every kind of published model on disk, Whisper first, each with its own way back.
+pub fn families(root: &Path) -> Vec<Family> {
+    let now = std::fs::read_to_string(root.join("current")).unwrap_or_default();
+    let now = now.trim();
+    let mut out: Vec<Family> = by_kind(root)
+        .into_iter()
+        .map(|(kind, versions)| {
+            let active = versions.iter().any(|v| v == now);
+            let version = if active {
+                now.to_owned()
+            } else {
+                versions[0].clone()
+            };
+            let key = version_key(&version);
+            let older = versions.iter().find(|v| version_key(v) < key).cloned();
+            let label = if kind == "whisper" {
+                "Whisper".into()
+            } else {
+                let mut c = kind.chars();
+                c.next()
+                    .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                    .unwrap_or_default()
+            };
+            Family {
+                label,
+                version,
+                older,
+                active,
+            }
+        })
+        .collect();
+    out.sort_by_key(|f| f.label != "Whisper");
+    out
+}
+
+/// Roll one kind of model back: make the version before it (`older`, from `families`) the
+/// active model. Nothing is deleted.
+pub fn roll_back_to(root: &Path, older: &str) -> Result<()> {
+    if !families(root)
+        .iter()
+        .any(|f| f.older.as_deref() == Some(older))
+    {
+        bail!("That model is no longer on this computer");
+    }
+    activate(root, older)
 }
 
 /// Swap back to the previous model.
@@ -714,7 +806,28 @@ mod tests {
         let second = [published_model("w2", None), published_model("o2", omni)];
         assert_eq!(get(&root, &second), ("o2".into(), 2));
         assert!(root.join("w2").is_dir() && root.join("o1").is_dir());
-        assert!(!root.join("w1").exists() && !root.join("old").exists());
+        // Each kind keeps the version before it, for its own Roll back; older ones go.
+        assert!(root.join("w1").is_dir() && !root.join("old").exists());
+        if cfg!(feature = "omni") {
+            let f = families(&root);
+            assert_eq!(
+                (
+                    f[0].label.as_str(),
+                    f[0].version.as_str(),
+                    f[0].older.as_deref()
+                ),
+                ("Whisper", "w2", Some("w1"))
+            );
+            assert_eq!(
+                (
+                    f[1].label.as_str(),
+                    f[1].version.as_str(),
+                    f[1].older.as_deref()
+                ),
+                ("Omnilingual", "o2", Some("o1"))
+            );
+            assert!(f[1].active && !f[0].active);
+        }
         // Rolling back keeps everything that is published.
         assert_eq!(rollback(&root).unwrap(), "o1");
         assert!(root.join("w2").is_dir() && root.join("o2").is_dir());

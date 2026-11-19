@@ -20,6 +20,21 @@ const TRIED: usize = 5;
 /// scores they all mean "no letter here".
 const MARKS: usize = 4;
 
+/// ONNX Runtime allows one environment per process, so it is made on the first load and shared
+/// by every later one (switching models back and forth loads the engine again).
+fn environment() -> Result<ort::environment::Environment> {
+    static ENV: Mutex<Option<ort::environment::Environment>> = Mutex::new(None);
+    let mut env = ENV
+        .lock()
+        .map_err(|_| anyhow::anyhow!("ONNX Runtime poisoned"))?;
+    if let Some(env) = env.as_ref() {
+        return Ok(env.clone());
+    }
+    let made = ort::init().with_telemetry(false).build()?;
+    *env = Some(made.clone());
+    Ok(made)
+}
+
 pub struct Engine {
     session: Mutex<ort::session::Session>,
     letters: Vec<String>,
@@ -39,8 +54,7 @@ impl Engine {
         if letters.len() <= MARKS {
             bail!("The letter table is empty");
         }
-        let env = ort::init().with_telemetry(false).build()?;
-        let session = ort::session::Session::builder(&env)?
+        let session = ort::session::Session::builder(&environment()?)?
             .with_intra_threads(crate::asr::threads() as usize)
             .map_err(|e| anyhow::anyhow!("{e}"))?
             .commit_from_file(model)

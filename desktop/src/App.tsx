@@ -3,7 +3,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ChevronDown, Download, FileAudio, LoaderCircle, Mic, Settings } from "lucide-react";
 import { Wordmark } from "@/components/brand";
 import { toast } from "sonner";
-import { api, message, type Compute, type Listed, type Progress, type Status } from "@/lib/api";
+import { api, message, type Compute, type Family, type Listed, type Progress, type Status } from "@/lib/api";
 import { Composer } from "@/components/composer";
 import { ContributeView } from "@/components/contribute";
 import { EntryView, type Entry } from "@/components/entry";
@@ -404,17 +404,31 @@ export default function App() {
     }
   }
 
-  /** The model tag: download the newer model when there is one, else look for one. */
+  /** The newer version of the model in use: the catalog's model of the same kind, not here yet. */
+  function newerOf(list: Listed[]) {
+    return list.find((m) => !m.installed && (m.label === "Omnilingual") === !!status?.cpuOnly) ?? null;
+  }
+
+  /** Ask before downloading the newer model, saying which one and how big; without its details
+      (the catalog could not be read), download the newer versions as before. */
+  function offerNewer(list: Listed[]) {
+    const m = newerOf(list);
+    if (m) setAsking(m);
+    else return pull();
+  }
+
+  /** The model tag: offer the newer model when there is one, else look for one. */
   async function checkForUpdates() {
     if (pulling || checking) return;
-    if (newer) return pull();
+    if (newer) return offerNewer(catalog);
     setChecking(true);
     try {
       const v = await api.newerModel();
-      api.modelCatalog().then(setCatalog);
+      const list = await api.modelCatalog();
+      setCatalog(list);
       if (v) {
         setNewer(true);
-        await pull();
+        await offerNewer(list);
       } else toast.success("You have the latest speech model.");
     } catch (e) {
       toast.error(`Cannot check for a newer model: ${message(e)}`);
@@ -423,11 +437,16 @@ export default function App() {
     }
   }
 
-  async function rollback() {
+  /** Settings: roll one kind of model back to its older version, which becomes the one in use. */
+  async function rollback(family: Family) {
+    if (!family.older || recording) return;
     try {
-      const version = await api.rollbackModel();
+      await api.rollbackModel(family.older);
       await refresh();
-      toast.success(`Back to model ${version}`);
+      api.modelCatalog().then(setCatalog);
+      api.newerModel().then(setNewer);
+      toast.success(`Now using ${modelName(family.label)}, version ${family.older}.`);
+      api.warm().catch((e) => toast.error(message(e)));
     } catch (e) {
       toast.error(message(e));
     }
@@ -456,7 +475,9 @@ export default function App() {
     setProgress(null);
     try {
       await api.downloadModel(model.version);
+      if (model.version === newerOf(catalog)?.version) setNewer(false);
       await refresh();
+      api.newerModel().then(setNewer);
       api.modelCatalog().then(setCatalog);
       toast.success(`Now using ${modelName(model.label)}.`);
       api.warm().catch((e) => toast.error(message(e)));
@@ -780,7 +801,10 @@ export default function App() {
       </footer>
       </div>
 
-      <DownloadModelDialog model={asking} otherIsOmni={status?.cpuOnly} onOpenChange={(o) => !o && setAsking(null)} onDownload={download} />
+      <DownloadModelDialog
+        model={asking}
+        replaces={newer && asking?.version === newerOf(catalog)?.version ? (status?.model ?? undefined) : undefined}
+        otherIsOmni={status?.cpuOnly} onOpenChange={(o) => !o && setAsking(null)} onDownload={download} />
 
       <SettingsDialog
         open={settingsOpen}
@@ -789,6 +813,7 @@ export default function App() {
         onShortcut={setShortcut}
         // Its name with its version ("Omnilingual 2026.11.18-omni"); a model without a name by its version.
         model={status?.model ? (modelLabel && modelLabel !== status.model ? `${modelLabel} ${status.model}` : status.model) : null}
+        activeModel={status?.model ?? null}
         appVersion={status?.appVersion}
         entries={entries.length}
         onRollback={rollback}

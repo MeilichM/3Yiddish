@@ -83,11 +83,14 @@ export function ModelSetup({
 /** The model tag's menu asks before downloading a model nobody has here yet. */
 export function DownloadModelDialog({
   model,
+  replaces,
   otherIsOmni,
   onOpenChange,
   onDownload,
 }: {
   model: Listed | null;
+  /** When this is a newer version of the model in use: the version it replaces. */
+  replaces?: string;
   /** The model in use now is the Omnilingual-based one. */
   otherIsOmni?: boolean;
   onOpenChange: (open: boolean) => void;
@@ -95,20 +98,35 @@ export function DownloadModelDialog({
 }) {
   const omni = model?.label === "Omnilingual";
   /** Only the Omnilingual-based model is a second model; a Whisper one is the main one, again. */
-  const second = omni || !!otherIsOmni;
+  const second = !replaces && (omni || !!otherIsOmni);
+  const name = model ? modelName(model.label) : "";
   return (
     <Dialog open={!!model} onOpenChange={onOpenChange}>
       <DialogContent className="gap-5 sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Download {model && modelName(model.label)}?</DialogTitle>
+          <DialogTitle>{replaces ? "Download the newer model?" : `Download ${name}?`}</DialogTitle>
           <DialogDescription className="leading-relaxed">
-            About {model && mb(model.size)}, downloaded once and checked after download.
+            Downloaded once and checked after download.
             {second &&
               " It makes different mistakes than the model you have, so when one gets a recording wrong, try the other."}{" "}
-            You can switch back any time from this menu.
+            {replaces
+              ? "The one you have stays on this computer; Roll back in Settings goes back to it."
+              : "You can switch back any time from this menu."}
             {omni && " It runs on the processor only, not on the graphics card."}
           </DialogDescription>
         </DialogHeader>
+        {model && (
+          <div className="flex items-center justify-between gap-4 rounded-xl border px-4 py-3 text-sm">
+            <div className="flex flex-col gap-0.5">
+              <span className="font-medium">{name.charAt(0).toUpperCase() + name.slice(1)}</span>
+              <span className="text-xs text-muted-foreground tabular-nums">
+                Version {model.version}
+                {replaces && <> · you have {replaces}</>}
+              </span>
+            </div>
+            <span className="shrink-0 text-muted-foreground tabular-nums">{mb(model.size)}</span>
+          </div>
+        )}
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Not now

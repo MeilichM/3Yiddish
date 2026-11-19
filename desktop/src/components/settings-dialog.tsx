@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
-import { api, message } from "@/lib/api";
+import { api, message, type Family } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -13,6 +13,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { ShortcutPicker } from "@/components/shortcut-setting";
 import { About } from "@/components/about";
+import { modelName } from "@/components/model-setup";
 
 const windows = navigator.userAgent.includes("Windows");
 
@@ -37,6 +38,7 @@ export function SettingsDialog({
   shortcut,
   onShortcut,
   model,
+  activeModel,
   appVersion,
   entries,
   onRollback,
@@ -52,9 +54,11 @@ export function SettingsDialog({
   shortcut: string | null;
   onShortcut: (shortcut: string | null) => void;
   model: string | null;
+  /** The active model's version: Settings lists the models again when it changes. */
+  activeModel: string | null;
   appVersion?: string;
   entries: number;
-  onRollback: () => void;
+  onRollback: (family: Family) => Promise<void>;
   onClearHistory: () => void;
 }) {
   const [autostart, setAutostart] = useState(false);
@@ -65,6 +69,12 @@ export function SettingsDialog({
   const [confirmClear, setConfirmClear] = useState(false);
   /** Settings shows the About page instead of the settings. */
   const [about, setAbout] = useState(false);
+  /** Each kind of model here (Whisper, Omnilingual), each with its own Roll back. */
+  const [families, setFamilies] = useState<Family[]>([]);
+
+  useEffect(() => {
+    if (open) api.modelFamilies().then(setFamilies);
+  }, [open, activeModel]);
 
   useEffect(() => {
     if (!open) {
@@ -143,29 +153,54 @@ export function SettingsDialog({
           {error && <p className="px-1 text-xs text-destructive">{error}</p>}
 
           {contributing != null && (
-            <div className="flex flex-col gap-2">
-              <Group>
+            <Group>
+              <div>
                 <Row label="Contribute" htmlFor="contribute">
                   <Switch id="contribute" checked={contributing} onCheckedChange={onContributing} />
                 </Row>
-              </Group>
-              <p className="px-1 text-xs leading-relaxed text-muted-foreground">
-                Off: nothing leaves your computer. On: what you transcribe from now on, the
-                recordings with their text and technical facts (no name), is sent to 3Yiddish to
-                test and improve Yiddish speech to text; nothing from before is sent.
-              </p>
-            </div>
+                <p className="-mt-1 px-4 pb-3 text-xs leading-relaxed text-muted-foreground">
+                  Off: nothing leaves your computer. On: what you transcribe from now on, the
+                  recordings with their text and technical facts (no name), is sent to 3Yiddish to
+                  test and improve Yiddish speech to text; nothing from before is sent.
+                </p>
+              </div>
+            </Group>
+          )}
+
+          {/* Each kind of model rolls back on its own, to the version of it before. */}
+          {families.length > 0 && (
+            <Group>
+              {families.map((f) => (
+                <div key={f.label} className="flex min-h-12 items-center justify-between gap-4 px-4 py-2">
+                  <div className="flex min-w-0 flex-col">
+                    <span className="flex items-center gap-2 text-sm">
+                      {f.label}-based model
+                      {f.active && (
+                        <span className="rounded-full bg-primary/10 px-1.5 py-px text-[0.6875rem] font-medium">In use</span>
+                      )}
+                    </span>
+                    <span className="text-xs text-muted-foreground tabular-nums">Version {f.version}</span>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 shrink-0 px-2 text-xs"
+                    disabled={!f.older}
+                    title={
+                      f.older
+                        ? `Go back to version ${f.older} and use ${modelName(f.label)}`
+                        : "No earlier version on this computer"
+                    }
+                    onClick={() => onRollback(f).then(() => api.modelFamilies().then(setFamilies))}
+                  >
+                    Roll back
+                  </Button>
+                </div>
+              ))}
+            </Group>
           )}
 
           <Group>
-            <Row label="Speech model">
-              <span className="text-sm text-muted-foreground tabular-nums">{model ?? "None"}</span>
-              {model && (
-                <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={onRollback}>
-                  Roll back
-                </Button>
-              )}
-            </Row>
             <Row label="History">
               <span className="text-sm text-muted-foreground tabular-nums">{entries}</span>
               <Button

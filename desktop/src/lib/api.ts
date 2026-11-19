@@ -25,6 +25,17 @@ export interface Listed {
   installed: boolean;
 }
 
+/** One kind of model on this computer, as Settings lists it. */
+export interface Family {
+  /** "Whisper" or "Omnilingual". */
+  label: string;
+  /** The version in use: the active one when this kind is active, else the newest. */
+  version: string;
+  /** The version Roll back goes to, when one is still on disk. */
+  older: string | null;
+  active: boolean;
+}
+
 /** A piece of audio: a recording made here, or a file brought in. */
 export interface Clip {
   id: string;
@@ -138,7 +149,10 @@ export const api = {
   modelCatalog: () => invoke<Listed[]>("model_catalog"),
   /** Download one published model and make it the active one. */
   downloadModel: (version: string) => invoke<string>("download_model", { version }),
-  rollbackModel: () => invoke<string>("rollback_model"),
+  /** Each kind of model here, with the version in use and the one Roll back goes to. */
+  modelFamilies: () => invoke<Family[]>("model_families"),
+  /** Roll one kind of model back to its older version, which becomes the active model. */
+  rollbackModel: (older: string) => invoke<void>("rollback_model", { older }),
   switchModel: (version: string) => invoke<string>("switch_model", { version }),
   warm: () => invoke<void>("warm"),
   setCompute: (mode: Compute) => invoke<void>("set_compute", { mode }),

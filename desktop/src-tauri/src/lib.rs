@@ -150,6 +150,15 @@ struct Listed {
     installed: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Family {
+    label: String,
+    version: String,
+    older: Option<String>,
+    active: bool,
+}
+
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Clip {
@@ -319,11 +328,22 @@ async fn download_model(version: String, app: AppHandle, core: Shared<'_>) -> Ou
     .map_err(fail)?
 }
 
+/// Each kind of model on this computer (Whisper, Omnilingual), for Settings: the version in
+/// use and the one Roll back goes to.
 #[tauri::command]
-fn rollback_model(core: Shared) -> Out<String> {
-    let version = model::rollback(&paths::models()).map_err(fail)?;
+fn model_families() -> Vec<Family> {
+    model::families(&paths::models())
+        .into_iter()
+        .map(|f| Family { label: f.label, version: f.version, older: f.older, active: f.active })
+        .collect()
+}
+
+/// Roll one kind of model back to `older` (from `model_families`), which becomes the active one.
+#[tauri::command]
+fn rollback_model(older: String, core: Shared) -> Out<()> {
+    model::roll_back_to(&paths::models(), &older).map_err(fail)?;
     core.drop_engine();
-    Ok(version)
+    Ok(())
 }
 
 /// Make one of the installed models the active one; returns its name. Nothing is deleted, and
@@ -780,6 +800,7 @@ pub fn run() {
             pull_model,
             model_catalog,
             download_model,
+            model_families,
             rollback_model,
             switch_model,
             warm,
