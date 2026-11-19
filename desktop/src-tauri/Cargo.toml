@@ -1,6 +1,6 @@
 [package]
 name = "three-yiddish-desktop"
-version = "0.3.0"
+version = "0.5.0"
 description = "3Yiddish desktop app: Yiddish speech to text in a native window"
 edition = "2024"
 license = "CC-BY-NC-SA-4.0"
@@ -35,6 +35,11 @@ tokio = { version = "1", features = ["time"] }
 
 # Push-to-talk on modifier keys alone (Ctrl + Win): a keyboard hook, since a global shortcut
 # needs one ordinary key.
+# The second speech model (Omnilingual-based, through ONNX Runtime) runs everywhere the core's
+# release builds run it: every computer but an Intel Mac.
+[target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
+three-yiddish = { path = "../..", features = ["omni"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",

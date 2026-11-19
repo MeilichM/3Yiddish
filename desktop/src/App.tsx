@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { ChevronDown, FileAudio, LoaderCircle, Mic, Settings } from "lucide-react";
+import { ChevronDown, Download, FileAudio, LoaderCircle, Mic, Settings } from "lucide-react";
 import { Wordmark } from "@/components/brand";
 import { toast } from "sonner";
-import { api, message, type Compute, type Progress, type Status } from "@/lib/api";
+import { api, message, type Compute, type Listed, type Progress, type Status } from "@/lib/api";
 import { Composer } from "@/components/composer";
 import { ContributeView } from "@/components/contribute";
 import { EntryView, type Entry } from "@/components/entry";
-import { ModelSetup } from "@/components/model-setup";
+import { DownloadModelDialog, mb, ModelSetup, modelName } from "@/components/model-setup";
 import { SettingsDialog } from "@/components/settings-dialog";
 import { ThemeMenu } from "@/components/theme-menu";
 import { badgeVariants } from "@/components/ui/badge";
@@ -77,7 +77,13 @@ export default function App() {
   const [pulling, setPulling] = useState(false);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [pullError, setPullError] = useState<string | null>(null);
-  const [newer, setNewer] = useState<string | null>(null);
+  /** A newer version of a model on this computer is out. */
+  const [newer, setNewer] = useState(false);
+  /** Every model the menu offers: on disk, or published and not downloaded yet. */
+  const [catalog, setCatalog] = useState<Listed[]>([]);
+  /** The model whose download is being asked about, and the one downloading now. */
+  const [asking, setAsking] = useState<Listed | null>(null);
+  const [downloading, setDownloading] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const [shortcut, setShortcut] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -113,7 +119,8 @@ export default function App() {
   useEffect(() => {
     refresh().then((s) => {
       if (s.model) api.warm().catch((e) => toast.error(message(e)));
-      api.newerModel().then((v) => setNewer(s.model ? v : null));
+      api.newerModel().then((v) => setNewer(!!s.model && v));
+      api.modelCatalog().then(setCatalog);
     });
     const off = api.onModelProgress(setProgress);
     return () => void off.then((f) => f());
@@ -384,8 +391,9 @@ export default function App() {
     setProgress(null);
     try {
       const version = await api.pullModel();
-      setNewer(null);
+      setNewer(false);
       await refresh();
+      api.modelCatalog().then(setCatalog);
       toast.success(`Speech model ${version} is ready`);
       api.warm().catch((e) => toast.error(message(e)));
     } catch (e) {
@@ -403,8 +411,9 @@ export default function App() {
     setChecking(true);
     try {
       const v = await api.newerModel();
+      api.modelCatalog().then(setCatalog);
       if (v) {
-        setNewer(v);
+        setNewer(true);
         await pull();
       } else toast.success("You have the latest speech model.");
     } catch (e) {
@@ -431,10 +440,31 @@ export default function App() {
       const label = await api.switchModel(version);
       await refresh();
       api.newerModel().then(setNewer);
-      toast(`Now using the ${label} model.`);
+      toast(`Now using ${modelName(label)}.`);
       api.warm().catch((e) => toast.error(message(e)));
     } catch (e) {
       toast.error(message(e));
+    }
+  }
+
+  /** A model from the menu that is not here yet, after its download was agreed to. */
+  async function download(model: Listed) {
+    setAsking(null);
+    if (pulling || recording) return;
+    setPulling(true);
+    setDownloading(model.label);
+    setProgress(null);
+    try {
+      await api.downloadModel(model.version);
+      await refresh();
+      api.modelCatalog().then(setCatalog);
+      toast.success(`Now using ${modelName(model.label)}.`);
+      api.warm().catch((e) => toast.error(message(e)));
+    } catch (e) {
+      toast.error(message(e));
+    } finally {
+      setPulling(false);
+      setDownloading(null);
     }
   }
 
@@ -462,6 +492,22 @@ export default function App() {
 
   /** The active model's name: its own label (a hand-placed model's), else its version. */
   const modelLabel = status?.models.find((m) => m.version === status.model)?.label ?? status?.model;
+  /** The menu's models: the catalog (published ones, the main one first), then anything on disk
+      it does not know of (offline, or put in by hand). */
+  const menuModels: Listed[] = [
+    ...catalog.map((m) => ({ ...m, installed: m.installed || !!status?.models.some((s) => s.version === m.version) })),
+    ...(status?.models ?? [])
+      .filter((s) => !catalog.some((m) => m.version === s.version))
+      .map((s) => ({ ...s, size: 0, installed: true })),
+  ];
+  /** Why the GPU cannot be picked, said in the compute menu itself; null when it can. */
+  const noGpu = !status
+    ? null
+    : status.cpuOnly
+      ? `${modelLabel === "Omnilingual" ? "Our Omnilingual-based model" : "This model"} runs on the processor only. To use the graphics card, switch to the Whisper-based model in the model menu.`
+      : !status.gpuAvailable
+        ? "No usable graphics card on this computer."
+        : null;
 
   // The logo and the model. On a Mac they get a row under the window buttons; elsewhere
   // (Windows, Linux) nothing else is up there, so they start the top row.
@@ -486,7 +532,7 @@ export default function App() {
                 <button
                   type="button"
                   disabled={pulling || checking}
-                  aria-label={newer ? `Model ${modelLabel}: model ${newer} is available` : `Model ${modelLabel}`}
+                  aria-label={newer ? `Model ${modelLabel}: a newer model is available` : `Model ${modelLabel}`}
                   className={cn(
                     badgeVariants({ variant: "secondary" }),
                     "relative cursor-pointer gap-1 overflow-visible font-normal tabular-nums hover:bg-secondary/70 disabled:cursor-default",
@@ -503,33 +549,50 @@ export default function App() {
             </TooltipTrigger>
             <TooltipContent>
               {pulling
-                ? "Downloading the new model…"
+                ? downloading
+                  ? `Downloading ${modelName(downloading)}…`
+                  : "Downloading the new model…"
                 : checking
                   ? "Looking for a newer model…"
                   : newer
-                    ? `New speech model ${newer}`
+                    ? "A newer speech model is out"
                     : "Speech model"}
             </TooltipContent>
           </Tooltip>
           <DropdownMenuContent align="start" className="w-auto min-w-44 whitespace-nowrap">
-            {status.models.length > 1 && (
+            {menuModels.length > 1 && (
               <>
                 <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">Speech model</DropdownMenuLabel>
+                {/* A model here switches at once; one not downloaded yet asks first (DownloadModelDialog). */}
                 <DropdownMenuRadioGroup value={status.model} onValueChange={switchModel}>
-                  {status.models.map((m) => (
-                    <DropdownMenuRadioItem key={m.version} value={m.version} disabled={recording}>
-                      {m.label}
-                      {m.label !== m.version && (
-                        <span className="ms-auto ps-3 text-xs text-muted-foreground tabular-nums">{m.version}</span>
-                      )}
-                    </DropdownMenuRadioItem>
-                  ))}
+                  {menuModels.map((m) =>
+                    m.installed ? (
+                      <DropdownMenuRadioItem key={m.version} value={m.version} disabled={recording}>
+                        {m.label}
+                        {m.label !== m.version && (
+                          <span className="ms-auto ps-3 text-xs text-muted-foreground tabular-nums">{m.version}</span>
+                        )}
+                      </DropdownMenuRadioItem>
+                    ) : (
+                      <DropdownMenuItem
+                        key={m.version}
+                        className="pe-8"
+                        disabled={recording || pulling}
+                        onSelect={() => setAsking(m)}
+                      >
+                        {m.label}
+                        <span className="ms-auto flex items-center gap-1 ps-3 text-xs text-muted-foreground tabular-nums">
+                          <Download className="size-3.5" /> {mb(m.size)}
+                        </span>
+                      </DropdownMenuItem>
+                    ),
+                  )}
                 </DropdownMenuRadioGroup>
                 <DropdownMenuSeparator />
               </>
             )}
             <DropdownMenuItem onSelect={checkForUpdates}>
-              {newer ? `Download model ${newer}` : "Check for a newer model"}
+              {newer ? "Download the newer model" : "Check for a newer model"}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -589,19 +652,27 @@ export default function App() {
                   </DropdownMenuTrigger>
                 </TooltipTrigger>
                 {status.compute === "gpu" && status.gpuName && <TooltipContent>{status.gpuName}</TooltipContent>}
+                {status.cpuOnly && <TooltipContent>This model runs on the processor only</TooltipContent>}
               </Tooltip>
-              <DropdownMenuContent align="end" className="min-w-32">
+              <DropdownMenuContent align="end" className={cn("min-w-32", noGpu && "w-72")}>
                 <DropdownMenuRadioGroup value={status.compute} onValueChange={setCompute}>
                   <Tooltip delayDuration={0}>
                     <TooltipTrigger asChild>
-                      <DropdownMenuRadioItem value="gpu" disabled={!status.gpuAvailable}>
+                      <DropdownMenuRadioItem value="gpu" disabled={!!noGpu}>
                         GPU
                       </DropdownMenuRadioItem>
                     </TooltipTrigger>
-                    {status.gpuName && <TooltipContent side="left">{status.gpuName}</TooltipContent>}
+                    {status.gpuName && !noGpu && <TooltipContent side="left">{status.gpuName}</TooltipContent>}
                   </Tooltip>
                   <DropdownMenuRadioItem value="cpu">CPU</DropdownMenuRadioItem>
                 </DropdownMenuRadioGroup>
+                {/* A greyed-out GPU says why, right under it: a disabled item shows no tooltip. */}
+                {noGpu && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <p className="px-2 py-1.5 text-xs leading-snug text-muted-foreground">{noGpu}</p>
+                  </>
+                )}
               </DropdownMenuContent>
             </DropdownMenu>
             </span>
@@ -630,7 +701,9 @@ export default function App() {
 
       {pulling && ready && progress && (
         <div className="flex items-center gap-3 border-b px-4 py-2 text-xs text-muted-foreground">
-          <span className="shrink-0">Downloading the new model</span>
+          <span className="shrink-0">
+            {downloading ? `Downloading ${modelName(downloading)}` : "Downloading the new model"}
+          </span>
           <Bar value={progress.total ? (progress.done / progress.total) * 100 : 0} className="flex-1" />
         </div>
       )}
@@ -695,6 +768,8 @@ export default function App() {
         />
       </footer>
       </div>
+
+      <DownloadModelDialog model={asking} otherIsOmni={status?.cpuOnly} onOpenChange={(o) => !o && setAsking(null)} onDownload={download} />
 
       <SettingsDialog
         open={settingsOpen}

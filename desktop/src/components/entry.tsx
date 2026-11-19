@@ -90,7 +90,7 @@ export function EntryView({
               title="Click to copy"
               className="cursor-pointer px-4 pt-3 pb-1 text-[1.0625rem] leading-relaxed whitespace-pre-wrap select-text"
             >
-              {entry.text || <span className="text-muted-foreground">(nothing heard)</span>}
+              {entry.text || <span className="text-muted-foreground">Could not hear anything.</span>}
             </p>
             <div className="flex items-center justify-between px-2 pb-1.5 text-xs text-muted-foreground">
               <div className="flex items-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">

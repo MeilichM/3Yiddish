@@ -125,6 +125,9 @@ struct Status {
     model: Option<String>,
     /// Every model on disk that can be run, for the model tag's menu.
     models: Vec<Installed>,
+    /// The active model runs on the processor only (the Omnilingual-based one), so the
+    /// graphics card is not offered while it is in use.
+    cpu_only: bool,
     compute: &'static str,
     gpu_available: bool,
     gpu_name: Option<String>,
@@ -135,6 +138,16 @@ struct Installed {
     version: String,
     /// The name to show: the model's own label, else its version.
     label: String,
+}
+
+/// A model that can be picked in the model tag's menu: on disk, or published and not yet
+/// downloaded (`size` is what a download takes).
+#[derive(Serialize)]
+struct Listed {
+    version: String,
+    label: String,
+    size: u64,
+    installed: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -219,53 +232,86 @@ struct Level {
 
 #[tauri::command]
 fn status(core: Shared) -> Status {
+    let current = model::current(&paths::models());
+    let cpu_only = current
+        .as_ref()
+        .is_some_and(|(_, file, _)| model::settings(file).omnilingual);
     let loaded = core.engine.lock().ok().and_then(|e| e.as_ref().map(|e| e.compute()));
     let compute = loaded.unwrap_or_else(|| {
-        if asr::gpu_usable() { asr::preferred() } else { Compute::Cpu }
+        if asr::gpu_usable() && !cpu_only { asr::preferred() } else { Compute::Cpu }
     });
     Status {
         app_version: env!("CORE_VERSION"),
-        model: model::current(&paths::models()).map(|(v, ..)| v),
+        model: current.map(|(v, ..)| v),
         models: model::installed(&paths::models())
             .into_iter()
             .map(|(version, label)| Installed { version, label })
             .collect(),
+        cpu_only,
         compute: compute.name(),
         gpu_available: asr::gpu_usable(),
         gpu_name: asr::gpu_name(),
     }
 }
 
-/// A newer model version than the installed one, if GitHub has one. Silent when offline.
-/// A model put in by hand is never offered a replacement.
+/// Is there a newer version of a model already on this computer? A model nobody downloaded is
+/// not an update (it is offered in the menu instead), and a model put in by hand is never
+/// offered a replacement. Silent when offline.
 #[tauri::command]
-async fn newer_model() -> Option<String> {
+async fn newer_model() -> bool {
     tauri::async_runtime::spawn_blocking(|| {
-        if model::current_is_local(&paths::models()) {
-            return None;
-        }
-        let latest = model::latest_version().ok()?;
-        let have = model::current(&paths::models()).map(|(v, ..)| v);
-        (have.as_deref() != Some(latest.as_str())).then_some(latest)
+        let root = paths::models();
+        !model::current_is_local(&root) && model::wanted(&root).unwrap_or(false)
     })
     .await
-    .ok()
-    .flatten()
+    .unwrap_or(false)
 }
 
-/// Download (or update to) the latest model, reporting progress as `model-progress` events.
+/// Every model this computer can run, downloaded or not, the main one first. Without a
+/// connection, only what is on disk.
+#[tauri::command]
+async fn model_catalog() -> Vec<Listed> {
+    tauri::async_runtime::spawn_blocking(|| {
+        model::catalog(&paths::models())
+            .into_iter()
+            .map(|l| Listed { version: l.version, label: l.label, size: l.size, installed: l.installed })
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Sends download progress to the window as `model-progress` events, ten a second at most.
+fn progress_to(app: AppHandle) -> impl FnMut(&str, u64, u64) {
+    let mut last = Instant::now();
+    move |file, done, total| {
+        if done == total || last.elapsed().as_millis() > 100 {
+            last = Instant::now();
+            let _ = app.emit("model-progress", Progress { file: file.into(), done, total });
+        }
+    }
+}
+
+/// The first model, or the newer versions of the models on this computer. Never a model
+/// nobody asked for: that one comes from `download_model`.
 #[tauri::command]
 async fn pull_model(app: AppHandle, core: Shared<'_>) -> Out<String> {
     let core = core.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let mut last = Instant::now();
-        let version = model::pull(&paths::models(), &mut |file, done, total| {
-            if done == total || last.elapsed().as_millis() > 100 {
-                last = Instant::now();
-                let _ = app.emit("model-progress", Progress { file: file.into(), done, total });
-            }
-        })
-        .map_err(plain)?;
+        let version = model::pull_updates(&paths::models(), &mut progress_to(app)).map_err(plain)?;
+        core.drop_engine();
+        Ok(version)
+    })
+    .await
+    .map_err(fail)?
+}
+
+/// Download one published model (asked for in the model tag's menu) and make it the active one.
+#[tauri::command]
+async fn download_model(version: String, app: AppHandle, core: Shared<'_>) -> Out<String> {
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let version = model::pull_one(&paths::models(), &version, &mut progress_to(app)).map_err(plain)?;
         core.drop_engine();
         Ok(version)
     })
@@ -322,6 +368,11 @@ fn set_compute(mode: String, core: Shared) -> Out<()> {
     let compute = Compute::parse(&mode).ok_or("mode must be gpu or cpu")?;
     if compute == Compute::Gpu && !asr::gpu_usable() {
         return Err("No usable graphics card on this computer.".into());
+    }
+    if compute == Compute::Gpu
+        && model::current(&paths::models()).is_some_and(|(_, file, _)| model::settings(&file).omnilingual)
+    {
+        return Err("This model runs on the processor only; switch to the Whisper-based model to use the graphics card.".into());
     }
     asr::remember(compute).map_err(fail)?;
     core.drop_engine();
@@ -727,6 +778,8 @@ pub fn run() {
             status,
             newer_model,
             pull_model,
+            model_catalog,
+            download_model,
             rollback_model,
             switch_model,
             warm,

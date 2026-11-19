@@ -9,9 +9,20 @@ export interface Status {
   model: string | null;
   /** Every model on disk that can be run: its folder (version) and the name to show. */
   models: { version: string; label: string }[];
+  /** The active model runs on the processor only (the Omnilingual-based one). */
+  cpuOnly: boolean;
   compute: Compute;
   gpuAvailable: boolean;
   gpuName: string | null;
+}
+
+/** A model the model tag's menu offers: on disk, or published and not downloaded yet. */
+export interface Listed {
+  version: string;
+  label: string;
+  /** Bytes a download takes (0 for one that is only on disk). */
+  size: number;
+  installed: boolean;
 }
 
 /** A piece of audio: a recording made here, or a file brought in. */
@@ -120,8 +131,13 @@ export const api = {
   onPtt: (f: (e: PttEvent) => void): Promise<UnlistenFn> =>
     listen<PttEvent>("ptt", (e) => f(e.payload)),
   status: () => invoke<Status>("status"),
-  newerModel: () => invoke<string | null>("newer_model"),
+  /** A newer version of a model on this computer is out. */
+  newerModel: () => invoke<boolean>("newer_model"),
+  /** The first model, or the newer versions of the ones here (never one nobody asked for). */
   pullModel: () => invoke<string>("pull_model"),
+  modelCatalog: () => invoke<Listed[]>("model_catalog"),
+  /** Download one published model and make it the active one. */
+  downloadModel: (version: string) => invoke<string>("download_model", { version }),
   rollbackModel: () => invoke<string>("rollback_model"),
   switchModel: (version: string) => invoke<string>("switch_model", { version }),
   warm: () => invoke<void>("warm"),
