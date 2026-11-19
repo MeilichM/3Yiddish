@@ -1,4 +1,4 @@
-/** What 3Yiddish is built on (the repository's NOTICE, as of 0.5.0), and each one's license. */
+/** What 3Yiddish is built on (the repository's NOTICE, as of 0.6.0), and each one's license. */
 const CREDITS: [name: string, license: string][] = [
   ["3Yiddish, © 2026 TripleU613", "CC BY-NC-SA 4.0"],
   ["OpenAI Whisper large-v3-turbo, © 2022 OpenAI (the Whisper-based model)", "MIT"],
@@ -6,6 +6,9 @@ const CREDITS: [name: string, license: string][] = [
   ["ivrit-ai/yi-whisper-large-v3-turbo, by ivrit.ai (models up to 2026.11.11)", "Apache 2.0"],
   ["whisper.cpp (speech engine)", "MIT"],
   ["ONNX Runtime, © Microsoft Corporation (runs the Omnilingual-based model)", "MIT"],
+  ["Gemma 4 E4B, by Google (chat's thinking model, downloaded with chat)", "Gemma Terms of Use"],
+  ["Our translator, a fine-tune of Meta's NLLB-200 (distilled 1.3B), © Meta Platforms, Inc. (chat)", "CC BY-NC 4.0"],
+  ["llama.cpp's server program, © 2023-2026 The ggml authors (runs chat's thinking model)", "MIT"],
   ["Tauri", "MIT / Apache 2.0"],
   ["React", "MIT"],
   ["shadcn/ui and Radix UI", "MIT"],

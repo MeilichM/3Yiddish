@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { ChevronDown, Download, FileAudio, LoaderCircle, Mic, Settings } from "lucide-react";
+import { ChevronDown, Download, FileAudio, LoaderCircle, MessageCircle, Mic, Settings } from "lucide-react";
 import { Wordmark } from "@/components/brand";
 import { toast } from "sonner";
 import { api, message, type Compute, type Family, type Listed, type Progress, type Status } from "@/lib/api";
@@ -9,6 +9,7 @@ import { ContributeView } from "@/components/contribute";
 import { EntryView, type Entry } from "@/components/entry";
 import { DownloadModelDialog, mb, ModelSetup, modelName } from "@/components/model-setup";
 import { SettingsDialog } from "@/components/settings-dialog";
+import { TalkView } from "@/components/talk";
 import { ThemeMenu } from "@/components/theme-menu";
 import { badgeVariants } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -49,7 +50,7 @@ function loadEntries(): Entry[] {
  * What gives way in the top row when the window is too narrow for all of it, first to go
  * first. The logo and the window buttons always stay.
  */
-const GIVE_WAY = ["contribute", "compute", "settings", "theme", "model"];
+const GIVE_WAY = ["contribute", "talk", "compute", "settings", "theme", "model"];
 
 /** Show everything that fits in the row; hide the rest, in GIVE_WAY's order. */
 function fit(row: HTMLElement) {
@@ -90,8 +91,10 @@ export default function App() {
   const [checking, setChecking] = useState(false);
   /** The take going now came from the push-to-talk shortcut. */
   const [ptt, setPtt] = useState(false);
-  /** Transcribe (the chat) or Contribute (record takes to test the model). */
-  const [view, setView] = useState<"chat" | "contribute">("chat");
+  /** Transcribe (the chat), Contribute (record takes to test the model) or Chat (talk to it). */
+  const [view, setView] = useState<"chat" | "contribute" | "talk">("chat");
+  /** Chat runs on this computer (not on an Intel Mac). */
+  const [talkable, setTalkable] = useState(false);
   /** The Contribute switch in Settings: off until switched on. */
   const [contributing, setContributing] = useState(false);
   const [owner, setOwner] = useState(false);
@@ -125,6 +128,10 @@ export default function App() {
     const off = api.onModelProgress(setProgress);
     return () => void off.then((f) => f());
   }, [refresh]);
+
+  useEffect(() => {
+    api.chatState().then((s) => setTalkable(s.available)).catch(() => {});
+  }, []);
 
   useEffect(() => {
     api.shortcutGet().then((info) => {
@@ -664,6 +671,22 @@ export default function App() {
               {brand}
             </div>
           )}
+          {/* Chat: talk to it in Yiddish (its download is offered on first use). */}
+          {ready && talkable && (
+            <span data-give-way="talk" className="flex shrink-0">
+              <Button
+                variant={view === "talk" ? "secondary" : "ghost"}
+                size="sm"
+                className="h-7 gap-1.5 px-2.5 text-xs"
+                aria-pressed={view === "talk"}
+                disabled={recording}
+                onClick={() => setView(view === "talk" ? "chat" : "talk")}
+              >
+                <MessageCircle className="size-3.5" />
+                Chat
+              </Button>
+            </span>
+          )}
           {/* Contribute is always here; it says Contributing while the switch in Settings is on. */}
           {ready && (
             <span data-give-way="contribute" className="flex shrink-0">
@@ -755,6 +778,8 @@ export default function App() {
         <ModelSetup progress={progress} busy={pulling} error={pullError} onDownload={pull} />
       ) : view === "contribute" ? (
         <ContributeView ready={ready} />
+      ) : view === "talk" ? (
+        <TalkView canHear={ready} />
       ) : (
         <main ref={scroller} className="flex-1 overflow-y-auto overscroll-contain">
           <div

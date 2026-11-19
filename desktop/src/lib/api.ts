@@ -59,6 +59,18 @@ export interface Level {
   failed: string | null;
 }
 
+/** Chat: whether it runs on this computer, and whether it is downloaded. */
+export interface ChatState {
+  available: boolean;
+  ready: boolean;
+}
+
+/** One message of a chat conversation, as the core takes it. */
+export interface ChatTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
 export interface Progress {
   file: string;
   done: number;
@@ -178,6 +190,17 @@ export const api = {
   forgetAudio: (path: string) => invoke<void>("forget_audio", { path }),
   onModelProgress: (f: (p: Progress) => void): Promise<UnlistenFn> =>
     listen<Progress>("model-progress", (e) => f(e.payload)),
+
+  chatState: () => invoke<ChatState>("chat_state"),
+  /** Bytes chat takes to download here; null offline. */
+  chatSize: () => invoke<number | null>("chat_size"),
+  chatDownload: () => invoke<void>("chat_download"),
+  onChatProgress: (f: (p: { done: number; total: number }) => void): Promise<UnlistenFn> =>
+    listen<{ done: number; total: number }>("chat-progress", (e) => f(e.payload)),
+  /** The answer, in Yiddish, to the conversation so far (ending with the person's message). */
+  chatSend: (messages: ChatTurn[]) => invoke<string>("chat_send", { messages }),
+  /** A spoken chat message's words; the recording is deleted after. */
+  chatHear: (path: string) => invoke<string>("chat_hear", { path }),
 };
 
 /** Tauri rejects with the Rust error string; anything else becomes readable too. */

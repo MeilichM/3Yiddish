@@ -13,7 +13,7 @@ const GAP = 3;
  * The live waveform: as many bars as fit the space it is given, newest at the right, so it
  * always spans the whole width (quiet stretches show as short bars, not as empty space).
  */
-function Waveform({ levels }: { levels: number[] }) {
+export function Waveform({ levels }: { levels: number[] }) {
   const box = useRef<HTMLDivElement>(null);
   const [fit, setFit] = useState(0);
   useEffect(() => {

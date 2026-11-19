@@ -4,6 +4,7 @@
 //! Send under Contribute (`contribute.rs`).
 mod contribute;
 mod ptt;
+mod talk;
 
 use serde::Serialize;
 use std::{
@@ -441,6 +442,7 @@ fn set_compute(mode: String, core: Shared) -> Out<()> {
     }
     asr::remember(compute).map_err(fail)?;
     core.drop_engine();
+    talk::forget();
     Ok(())
 }
 
@@ -827,6 +829,7 @@ pub fn run() {
             }
             // Shared transcriptions that have waited an hour go now.
             contribute::nudge(false);
+            talk::start();
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -880,6 +883,11 @@ pub fn run() {
             contribute::take_delete,
             contribute::take_clip,
             contribute::send_takes,
+            talk::chat_state,
+            talk::chat_size,
+            talk::chat_download,
+            talk::chat_send,
+            talk::chat_hear,
         ])
         .build(tauri::generate_context!())
         .expect("error while building 3Yiddish")
@@ -887,6 +895,7 @@ pub fn run() {
             // Quitting: shared transcriptions still waiting go now (as the terminal app does).
             if let tauri::RunEvent::Exit = event {
                 contribute::flush();
+                talk::stop();
             }
         });
 }

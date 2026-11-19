@@ -301,7 +301,7 @@ pub fn ensure(gpu: bool) -> Result<(String, String)> {
     std::fs::create_dir_all(&logs)?;
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
     let translator_port = free_port()?;
-    let translator = Command::new(&parts.translator_program)
+    let translator = command(&parts.translator_program)
         .arg("--model")
         .arg(&parts.translator)
         .arg("--listen")
@@ -376,7 +376,7 @@ fn start_thinker(
 ) -> Result<(Child, u16)> {
     let port = free_port()?;
     let dir = parts.server.parent().context("No folder")?;
-    let mut command = Command::new(&parts.server);
+    let mut command = command(&parts.server);
     command
         .current_dir(dir)
         .arg("-m")
@@ -394,6 +394,20 @@ fn start_thinker(
     }
     let child = command.spawn().context("Cannot start the thinking model")?;
     Ok((child, port))
+}
+
+/// A helper program, started without a window of its own: on Windows a program run from the
+/// desktop app (which has no console) would otherwise open a console window per helper.
+fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    #[allow(unused_mut)]
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
 }
 
 fn free_port() -> Result<u16> {
@@ -445,12 +459,12 @@ pub fn stop_stale() {
     for pid in pids.split_whitespace() {
         // Only our own helpers, never another program that reused the number.
         let name = if cfg!(windows) {
-            Command::new("tasklist")
+            command("tasklist")
                 .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
                 .output()
         } else {
             // The whole command line: on some systems the short name is cut off.
-            Command::new("ps")
+            command("ps")
                 .args(["-p", pid, "-o", "command="])
                 .output()
         };
@@ -460,9 +474,9 @@ pub fn stop_stale() {
         });
         if ours {
             let _ = if cfg!(windows) {
-                Command::new("taskkill").args(["/PID", pid, "/F"]).status()
+                command("taskkill").args(["/PID", pid, "/F"]).status()
             } else {
-                Command::new("kill").arg(pid).status()
+                command("kill").arg(pid).status()
             };
         }
     }
