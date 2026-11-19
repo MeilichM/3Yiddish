@@ -567,10 +567,16 @@ export default function App() {
                 <DropdownMenuRadioGroup value={status.model} onValueChange={switchModel}>
                   {menuModels.map((m) =>
                     m.installed ? (
-                      <DropdownMenuRadioItem key={m.version} value={m.version} disabled={recording}>
+                      <DropdownMenuRadioItem
+                        key={m.version}
+                        value={m.version}
+                        disabled={recording}
+                        // The model in use stands out from the rest, and from the hover.
+                        className="data-[state=checked]:bg-primary/[0.07] data-[state=checked]:font-medium data-[state=checked]:focus:bg-primary/10"
+                      >
                         {m.label}
                         {m.label !== m.version && (
-                          <span className="ms-auto ps-3 text-xs text-muted-foreground tabular-nums">{m.version}</span>
+                          <span className="ms-auto ps-3 text-xs font-normal text-muted-foreground tabular-nums">{m.version}</span>
                         )}
                       </DropdownMenuRadioItem>
                     ) : (
@@ -581,8 +587,13 @@ export default function App() {
                         onSelect={() => setAsking(m)}
                       >
                         {m.label}
-                        <span className="ms-auto flex items-center gap-1 ps-3 text-xs text-muted-foreground tabular-nums">
-                          <Download className="size-3.5" /> {mb(m.size)}
+                        <span className="ms-auto ps-3 text-xs text-muted-foreground tabular-nums">{mb(m.size)}</span>
+                        {/* A download button where the check mark goes; its edge darkens on hover. */}
+                        <span
+                          aria-hidden
+                          className="absolute end-1 flex size-6 items-center justify-center rounded-md border bg-background shadow-xs transition-colors group-focus/dropdown-menu-item:border-foreground/40"
+                        >
+                          <Download className="size-3.5" />
                         </span>
                       </DropdownMenuItem>
                     ),
