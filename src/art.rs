@@ -151,6 +151,21 @@ pub fn icon(name: &str, color: Rgb) -> RgbaImage {
             ".....##.....",
             "............",
         ],
+        // Sharing is off: the heart's outline only.
+        "heart-open" => [
+            "............",
+            "..###..###..",
+            ".#...##...#.",
+            "#..........#",
+            "#..........#",
+            "#..........#",
+            ".#........#.",
+            "..#......#..",
+            "...#....#...",
+            "....#..#....",
+            ".....##.....",
+            "............",
+        ],
         // Chat: a speech bubble.
         "chat" => [
             "............",
@@ -335,6 +350,21 @@ pub fn icon(name: &str, color: Rgb) -> RgbaImage {
             ".######.....",
             "..####......",
             "...##.......",
+            "............",
+        ],
+        // Something to get: an arrow coming down into a tray.
+        "download" => [
+            "............",
+            ".....##.....",
+            ".....##.....",
+            ".....##.....",
+            "..########..",
+            "...######...",
+            "....####....",
+            ".....##.....",
+            ".#........#.",
+            ".#........#.",
+            ".##########.",
             "............",
         ],
         "refresh" => [
@@ -653,8 +683,20 @@ mod tests {
         assert_eq!(logo.dimensions(), (86, 14));
         assert!(logo.pixels().any(|p| p[3] > 0));
         for name in [
-            "plus", "mic", "stop", "send", "refresh", "phone", "close", "gpu", "cpu", "whisper",
-            "omni", "model",
+            "plus",
+            "mic",
+            "stop",
+            "send",
+            "refresh",
+            "phone",
+            "close",
+            "gpu",
+            "cpu",
+            "whisper",
+            "omni",
+            "model",
+            "heart",
+            "heart-open",
         ] {
             assert_eq!(super::icon(name, [255; 3]).dimensions(), (12, 12));
             assert_eq!(super::tile(name, [255; 3], 20).dimensions(), (20, 20));

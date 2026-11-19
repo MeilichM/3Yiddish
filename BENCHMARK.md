@@ -2,7 +2,7 @@
 
 How good is it? Honest numbers.
 
-Not the best yet. We tested 17 Yiddish speech-to-text tools on 25 takes of free heimish
+Not the best yet. We tested 19 Yiddish speech-to-text tools and models on 25 takes of free heimish
 speech (1,191 words): websites, programs and open models, paid and free.
 
 **Wrong words per 100** is the main number: lower is better, and it does not change when
@@ -12,9 +12,11 @@ more tools are added. The best in each column is bold.
 |---|---|---|---|---|---|---|---|---|
 | Yiddish Labs | Paid website | **2.9** | **83.0** | **15** | **14** | **1** | **0** | **0** |
 | Yiddish Tools | Paid website | 4.7 | 67.8 | 6 | 4 | 2 | 3 | **0** |
-| **3Yiddish** | Free, on your own computer | 12.6 | 60.0 | 3 | 2 | 12 | 14 | 3 |
+| **3Yiddish, Whisper-based** | Free, on your own computer (in the app now) | 11.9 | 60.3 | 3 | 3 | 6 | 10 | 1 |
+| 3Yiddish, earlier model | Free, on your own computer (the app until 0.4.0) | 12.6 | 60.0 | 3 | 2 | 12 | 14 | 3 |
 | Devniks Voice | Free website | 13.5 | 61.1 | 4 | 4 | 5 | 6 | **0** |
 | ivrit-ai turbo | Free open model | 15.6 | 56.1 | 2 | 2 | 10 | 13 | 1 |
+| **3Yiddish, Omnilingual-based** | Free, on your own computer (in the app now) | 16.0 | 58.0 | 4 | 4 | 9 | 8 | 3 |
 | ivrit-ai large-v3 | Free open model | 18.3 | 59.6 | 5 | 5 | 11 | 8 | 2 |
 | Red Flow | Free website and app, online | 18.6 | 53.6 | 2 | 2 | 13 | 12 | 2 |
 | Yiddi Type, fast model | Free Windows program, small built-in model | 31.6 | 40.5 | 0 | 0 | 13 | 13 | 3 |
@@ -80,6 +82,9 @@ good small heimish model to download today.
   output as the plain Whisper rows: rough sound-spelling from one, German in Latin letters
   from the other.
 - Open models ran with the settings their authors give. 3Yiddish ran as the app runs it.
+- The two models in the app now were added last, and most of their words were judged by
+  AI agents, not the speaker. Their scores come from a later run with more tools in it,
+  which moves scores a little; wrong words per 100 compares directly.
 
 **What to keep in mind**
 

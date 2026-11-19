@@ -31,6 +31,10 @@ enum Update {
     Available(Option<String>, Option<String>),
     /// Progress or result of an app/model update, shown as the notice line.
     Upgrade(String, bool),
+    /// The models that can be picked (published or on disk), found in the background.
+    Catalog(Vec<crate::model::Listing>),
+    /// A model download under way: its name, bytes done and bytes in all.
+    Progress(String, u64, u64),
     /// An audio file chosen with the attach button (None: cancelled or no picker).
     Picked(Option<String>),
     /// A finished take: its file, length in seconds and loudness over time (for the voice
@@ -229,11 +233,19 @@ struct Screen {
     /// Updates found at startup (app version, model label) and whether one is running.
     app_update: Option<String>,
     model_update: Option<String>,
-    /// The active model's name, when more than one is installed and a click can switch.
+    /// The active model's name, when there is more than one to pick and a click can switch.
     model_switch: Option<String>,
+    /// The models that can be picked: published, or on disk.
+    catalog: Vec<crate::model::Listing>,
+    /// The question to download the model at this place in `catalog`.
+    model_card: Option<usize>,
+    /// A model download under way: its name, bytes done and bytes in all.
+    progress: Option<(String, u64, u64)>,
     /// Termux with the phone's own font: offer the font in which Yiddish letters read well.
     font_offer: bool,
     upgrading: bool,
+    /// A new version was just put in place: the refresh button is for starting it.
+    restart_due: bool,
     /// The playground is switched on here (`3yiddish playground on`): Pair phone shows.
     playground: bool,
     /// The phone pairing as the service last told it.
@@ -251,7 +263,7 @@ struct Screen {
     recording_path: Option<PathBuf>,
     /// The playground's screens (where it is switched on).
     play: playground::Play,
-    /// Sharing is on here: the Sharing chip shows in the top bar.
+    /// Sharing is on here: the heart in the top bar is full, and Contribute can stop it.
     sharing: bool,
     /// The sharing card is showing: the first-run question, or the chip's card.
     share_card: Option<ShareCard>,
@@ -560,8 +572,12 @@ enum Click {
     Record,
     UpdateApp,
     UpdateModel,
-    /// Use the next installed model.
+    /// Use the next model (asking to download it first when it is not here).
     SwitchModel,
+    /// Download the model at this place in the list, from its question.
+    GetModel(usize),
+    /// Leave the download question.
+    ModelNotNow,
     /// Chat, or write down what is said.
     Mode,
     GetFont,
@@ -607,11 +623,14 @@ fn switch_compute(state: &mut Screen) -> Option<bool> {
     Some(!gpu)
 }
 /// The active model's name for the switch chip; None with fewer than two models installed.
-fn model_switch_label() -> Option<String> {
+/// The name of the model in use, when there is more than one to pick from (on disk or
+/// published): then the model button shows it.
+fn model_switch_label(catalog: &[crate::model::Listing]) -> Option<String> {
     let root = crate::paths::models();
     let all = crate::model::installed(&root);
     let now = crate::model::current(&root)?.0;
-    (all.len() > 1).then(|| {
+    let choices = catalog.len().max(all.len());
+    (choices > 1).then(|| {
         all.into_iter()
             .find(|(v, _)| *v == now)
             .map(|(_, label)| label)
@@ -680,6 +699,37 @@ async fn chat(
         .and_then(Value::as_str)
         .context("No reply")?;
     Ok(json!({"text": reply}))
+}
+/// "Downloading the Whisper-based model ▕██████░░░░░░░░░░▏ 37%".
+fn progress_bar(label: &str, done: u64, total: u64) -> String {
+    let share = (done as f64 / total.max(1) as f64).clamp(0.0, 1.0);
+    let filled = (share * 16.0).round() as usize;
+    format!(
+        "Downloading the {label}-based model ▕{}{}▏ {}%",
+        "█".repeat(filled),
+        "░".repeat(16 - filled),
+        (share * 100.0) as u32
+    )
+}
+/// What there is to get, most needed first, with the words the bar shows for it: the first
+/// model (nothing works without it), a new version of the app, a newer model, the font.
+/// Nothing while one is on its way, or once a new version waits for Refresh to start it.
+fn offer(state: &Screen) -> Option<(Click, &'static str)> {
+    if state.upgrading || state.restart_due {
+        return None;
+    }
+    let model = state.model_update.as_deref();
+    if model == Some("first") {
+        Some((Click::UpdateModel, "Click the arrow to get the model."))
+    } else if state.app_update.is_some() {
+        Some((Click::UpdateApp, "New version: click the arrow."))
+    } else if model.is_some() {
+        Some((Click::UpdateModel, "New model: click the arrow."))
+    } else if state.font_offer {
+        Some((Click::GetFont, "Click the arrow for a better font."))
+    } else {
+        None
+    }
 }
 /// Does the service have a chat model set up? Only then is there a Chat button.
 fn chat_offered(state: &Screen) -> bool {
@@ -970,14 +1020,19 @@ fn terminal(
             // A model put here by hand is not replaced by the published one.
             None
         } else {
-            crate::model::latest_version()
+            // Any published model that is not on disk yet, whichever one is in use.
+            crate::model::wanted(&crate::paths::models())
                 .ok()
-                .filter(|v| have.as_ref() != Some(v))
+                .filter(|wanted| *wanted)
+                .map(|_| "new".to_owned())
         };
         let _ = check_tx.send(Update::Available(app, model));
+        let _ = check_tx.send(Update::Catalog(crate::model::catalog(
+            &crate::paths::models(),
+        )));
     });
     let mut state = Screen {
-        model_switch: model_switch_label(),
+        model_switch: model_switch_label(&[]),
         ..Screen::default()
     };
     let mut playground_view = None;
@@ -1085,12 +1140,29 @@ fn terminal(
                     state.app_update = app;
                     state.model_update = model;
                 }
+                Update::Catalog(list) => {
+                    // Nothing to transcribe with yet: the first thing asked is whether to
+                    // download the model (after the sharing question, if that is up).
+                    let none = crate::model::current(&crate::paths::models()).is_none();
+                    if none && list.first().is_some_and(|m| !m.installed) {
+                        state.model_card = Some(0);
+                    }
+                    state.catalog = list;
+                    state.model_switch = model_switch_label(&state.catalog);
+                }
+                Update::Progress(label, done, total) => {
+                    state.progress = Some((label, done, total));
+                }
                 Update::Upgrade(text, finished) => {
                     state.notice = text;
                     // The same words again (a second try) stay up for their full time.
                     state.notice_since = None;
                     if finished {
                         state.upgrading = false;
+                        state.restart_due |= state.notice.starts_with("Updated to");
+                        state.progress = None;
+                        // A second model may have arrived: its switch button shows at once.
+                        state.model_switch = model_switch_label(&state.catalog);
                     }
                 }
                 Update::Play(answer) => playground::answer(&mut state, answer, &play_jobs),
@@ -1159,7 +1231,9 @@ fn terminal(
                         Ok(value) => {
                             state.notice.clear();
                             let answer = value["text"].as_str().unwrap_or_default().trim();
-                            if !answer.is_empty() {
+                            if answer.is_empty() {
+                                state.notice = "Could not hear anything.".into();
+                            } else {
                                 state.plain_log.push((false, answer.to_owned()));
                             }
                         }
@@ -1327,6 +1401,30 @@ fn terminal(
             };
             if let Some(answer) = answer {
                 playground::click(&mut state, answer, &play_jobs)?;
+                continue;
+            }
+        }
+        // The download question: Enter downloads, Esc is Not now; nothing is typed.
+        if let Some(index) = state.model_card
+            && state.share_card.is_none()
+            && !recording(&state)
+        {
+            let control = key.modifiers.contains(KeyModifiers::CONTROL);
+            let answer = match key.code {
+                KeyCode::Enter => Click::GetModel(index),
+                KeyCode::Esc => Click::ModelNotNow,
+                KeyCode::Char('r' | 'c') if control => Click::Key(KeyCode::Null),
+                _ => continue,
+            };
+            if answer != Click::Key(KeyCode::Null) {
+                click(
+                    &mut state,
+                    answer,
+                    &tx,
+                    &compute_actions,
+                    &pair_actions,
+                    &play_jobs,
+                )?;
                 continue;
             }
         }
@@ -1610,14 +1708,22 @@ fn click(
             state.app_update = None;
             return Ok(None);
         }
+        Click::UpdateModel
+            if state.model_update.as_deref() == Some("first")
+                && state.catalog.first().is_some_and(|m| !m.installed) =>
+        {
+            state.model_card = Some(0);
+            return Ok(None);
+        }
         Click::UpdateModel => {
             state.upgrading = true;
             let tx = tx.clone();
             let label = state.model_update.take();
             std::thread::spawn(move || {
                 let mut last = 101;
-                let result =
-                    crate::model::pull(&crate::paths::models(), &mut |name, done, total| {
+                let result = crate::model::pull_updates(
+                    &crate::paths::models(),
+                    &mut |name, done, total| {
                         let pct = done * 100 / total.max(1);
                         if pct != last {
                             last = pct;
@@ -1626,7 +1732,8 @@ fn click(
                                 false,
                             ));
                         }
-                    });
+                    },
+                );
                 let text = match result {
                     Ok(v) => format!("Model {v} is installed and active."),
                     Err(e) => {
@@ -1648,11 +1755,68 @@ fn click(
             .into();
             return Ok(None);
         }
+        Click::SwitchModel if !state.catalog.is_empty() => {
+            let root = crate::paths::models();
+            let now = crate::model::current(&root).map(|(v, ..)| v);
+            let at = state
+                .catalog
+                .iter()
+                .position(|m| Some(&m.version) == now.as_ref());
+            let next = at.map_or(0, |i| (i + 1) % state.catalog.len());
+            let pick = state.catalog[next].clone();
+            if pick.installed {
+                match crate::model::use_version(&root, &pick.version) {
+                    Ok(()) => {
+                        state.notice = format!("Now using our {}-based model.", pick.label);
+                        state.model_switch = model_switch_label(&state.catalog);
+                    }
+                    Err(e) => state.notice = crate::model::plain_error(&e),
+                }
+            } else {
+                state.model_card = Some(next);
+            }
+            return Ok(None);
+        }
+        Click::ModelNotNow => {
+            state.model_card = None;
+            return Ok(None);
+        }
+        Click::GetModel(index) => {
+            state.model_card = None;
+            let Some(pick) = state.catalog.get(index).cloned() else {
+                return Ok(None);
+            };
+            state.upgrading = true;
+            state.progress = Some((pick.label.clone(), 0, pick.size));
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let root = crate::paths::models();
+                // The download goes file by file; the bar shows the whole model.
+                let (mut base, mut file, mut last) = (0u64, String::new(), (0u64, 0u64));
+                let result =
+                    crate::model::pull_one(&root, &pick.version, &mut |name, done, total| {
+                        if name != file {
+                            base += last.1;
+                            file = name.to_owned();
+                        }
+                        last = (done, total);
+                        let _ =
+                            tx.send(Update::Progress(pick.label.clone(), base + done, pick.size));
+                    });
+                let text = match result {
+                    Ok(_) => format!("Now using our {}-based model.", pick.label),
+                    Err(e) => crate::model::plain_error(&e),
+                };
+                let _ = tx.send(Update::Catalog(crate::model::catalog(&root)));
+                let _ = tx.send(Update::Upgrade(text, true));
+            });
+            return Ok(None);
+        }
         Click::SwitchModel => {
             match crate::model::switch_next(&crate::paths::models()) {
                 Ok((_, label)) => {
-                    state.notice = format!("Now using the {label} model.");
-                    state.model_switch = model_switch_label();
+                    state.notice = format!("Now using our {label}-based model.");
+                    state.model_switch = model_switch_label(&state.catalog);
                 }
                 Err(e) => state.notice = crate::model::plain_error(&e),
             }
@@ -1722,7 +1886,7 @@ fn plain_alert(error: &str) -> String {
         None => error,
     };
     if said.starts_with("No Transcribe model yet") {
-        "No model yet: use Get model first.".into()
+        "No model yet: click the arrow at the top first.".into()
     } else if said.starts_with("Model endpoint could not be reached")
         || said.starts_with("Translation worker is unreachable")
     {
@@ -2210,7 +2374,7 @@ fn nerd_font() -> bool {
     }
 }
 /// What `nerd_font` found: 0 not asked yet, 1 no, 2 yes. Set back to 0 when the font changes
-/// under the app ("Get font"), so the next frame asks again.
+/// under the app (the download arrow), so the next frame asks again.
 static NERD: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 thread_local! {
     /// Tests draw each look whatever font this machine has.
@@ -2283,7 +2447,7 @@ fn square(
             "refresh" => "↻",
             "phone" => "▯",
             "check" => "✓",
-            "heart" => "♡",
+            "heart" | "heart-open" => "♡",
             "mic" => "●",
             "stop" => "■",
             "send" => "➤",
@@ -2360,6 +2524,7 @@ fn square(
             "plus" => "\u{f067}",
             "close" => "\u{f00d}",
             "refresh" => "\u{f021}",
+            "download" => "\u{f019}",
             "phone" => "\u{f10b}",
             "check" => "\u{f00c}",
             "mic" => "\u{f130}",
@@ -2806,20 +2971,6 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
             .unwrap_or(8)
         + 2;
     let mut tools: Vec<Control> = Vec::new();
-    if state.app_update.is_some() {
-        tools.push(("Update app", Click::UpdateApp, !state.upgrading && !active));
-    }
-    if let Some(label) = &state.model_update {
-        tools.push((
-            if label == "first" {
-                "Get model"
-            } else {
-                "New model"
-            },
-            Click::UpdateModel,
-            !state.upgrading && !active,
-        ));
-    }
     if let Some(label) = &state.model_switch {
         tools.insert(
             0,
@@ -2833,30 +2984,20 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
     if chat_offered(state) {
         tools.insert(0, ("mode", Click::Mode, !state.busy && !active));
     }
-    if state.font_offer {
-        // Before the model in the list: the model's chip keeps its place nearest the buttons.
-        let at = tools
-            .len()
-            .saturating_sub(usize::from(state.model_update.is_some()));
-        tools.insert(
-            at,
-            ("Get font", Click::GetFont, !state.upgrading && !active),
-        );
-    }
-    if state.sharing {
-        // Only while sharing is on, as the way to switch it off; the first chip to give way
-        // on a narrow screen (`3yiddish share off` does the same).
-        tools.insert(0, ("Sharing", Click::Play(PlayClick::ShareOpen), !active));
-    }
     let mut x = area.right();
     for (icon, color, action, enabled) in [
         (("close", "✕"), THEME_RECORD, Click::Key(KeyCode::Esc), true),
-        (
-            ("refresh", "↻"),
-            THEME_ACCENT,
-            Click::Key(KeyCode::Char('r')),
-            !state.busy && !active,
-        ),
+        // Something to get (a new version, a model, the font): the refresh button becomes
+        // the way to get it, and the bar says what a click will do.
+        match offer(state) {
+            Some((action, _)) => (("download", "↓"), THEME_ACCENT, action, !active),
+            None => (
+                ("refresh", "↻"),
+                THEME_ACCENT,
+                Click::Key(KeyCode::Char('r')),
+                !state.busy && !active,
+            ),
+        },
     ] {
         x -= side_w;
         square(
@@ -2870,7 +3011,7 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
         );
         x -= 1;
     }
-    // The engine button is the first to go when the bar is crowded: the update chips, the
+    // The engine button is the first to go when the bar is crowded: the
     // status (room is kept for it, so the button does not come and go with every recording)
     // and an alert all come before it.
     // A chip's columns and the gap after it.
@@ -2909,13 +3050,19 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
     // Contribute: in the accent color while the playground (or its explanation) shows.
     let lit = play || state.play.consent;
     if x >= logo_end + side_w && (lit || x >= logo_end + side_w + 1 + chips + 16) {
-        // The update chips come first on a narrow screen, but never the way back to the chat.
+        // The buttons to its left come first on a narrow screen, but never the way back to the chat.
         x -= side_w;
         square(
             frame,
             &mut hits,
             Rect::new(x, area.y, side_w, 3),
-            ("heart", &["♥"]),
+            // A full heart while sharing is on, an open one otherwise; the way to stop
+            // sharing is inside Contribute.
+            if state.sharing {
+                ("heart", &["♥"])
+            } else {
+                ("heart-open", &["♡"])
+            },
             if lit { THEME_ACCENT } else { Color::Gray },
             Click::Play(PlayClick::Toggle),
             !active && !state.play.thinking,
@@ -3031,10 +3178,23 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
     }
     // Alerts live in the top bar, between the logo and the buttons. One that does not fit
     // there whole (a narrow window, a phone) gets the row under the bar to itself.
-    if !state.notice.is_empty() {
+    // With nothing else to say, the bar says what the download button is offering.
+    let hint = offer(state)
+        .filter(|_| state.notice.is_empty() && !active && !state.busy)
+        .map(|(_, words)| words.to_owned());
+    // A model on its way: a bar, filling as it comes, in place of any other words.
+    let hint = state
+        .progress
+        .as_ref()
+        .map(|(label, done, total)| progress_bar(label, *done, *total))
+        .or(hint);
+    if !state.notice.is_empty() || hint.is_some() {
         let left = logo_end;
         let right = x.saturating_sub(status_w + 2);
-        let notice = clean(&state.notice).replace('\n', " ");
+        let notice = match &hint {
+            Some(words) => words.clone(),
+            None => clean(&state.notice).replace('\n', " "),
+        };
         let length = notice.chars().count() as u16;
         if right > left && length <= right - left {
             // Centered on the window itself; nudged only if it would touch the logo or buttons.
@@ -3045,7 +3205,7 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
                 Paragraph::new(notice).style(Style::default().fg(THEME_ACCENT)),
                 Rect::new(start, head, length, 1),
             );
-        } else {
+        } else if hint.is_none() {
             let mut text: String = notice.chars().take(area.width as usize).collect();
             if length > area.width {
                 text.pop();
@@ -3081,6 +3241,26 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
         playground::draw_share(
             frame,
             card,
+            Rect::new(
+                area.x,
+                top,
+                area.width,
+                screen.height.saturating_sub(top + 1),
+            ),
+            &mut hits,
+        );
+        return hits;
+    }
+    if let Some(model) = state
+        .model_card
+        .and_then(|i| state.catalog.get(i).map(|m| (i, m)))
+    {
+        let top = area.y + 4;
+        let first = !state.catalog.iter().any(|m| m.installed);
+        playground::draw_model_card(
+            frame,
+            model,
+            first,
             Rect::new(
                 area.x,
                 top,
@@ -4145,6 +4325,81 @@ mod tests {
         assert_eq!(again.input, "a draft");
     }
     #[test]
+    fn a_model_is_downloaded_only_after_saying_yes() {
+        let listing = |version: &str, label: &str, size: u64, installed| crate::model::Listing {
+            version: version.into(),
+            label: label.into(),
+            size,
+            installed,
+        };
+        let draw = |state: &Screen| {
+            let mut term =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+            let mut hits = vec![];
+            term.draw(|f| hits = draw_plain(f, state)).unwrap();
+            (rendered_text(&term), hits)
+        };
+        // First open, nothing here: the question names the model and its size.
+        let mut state = Screen::default();
+        state.catalog = vec![
+            listing("w", "Whisper", 575_000_000, false),
+            listing("o", "Omnilingual", 1_032_000_000, false),
+        ];
+        state.model_card = Some(0);
+        let (text, hits) = draw(&state);
+        assert!(text.contains("Download the speech model?"), "{text}");
+        assert!(text.contains("about 575 MB"), "{text}");
+        assert!(hits.iter().any(|h| h.action == Click::GetModel(0)));
+        assert!(hits.iter().any(|h| h.action == Click::ModelNotNow));
+        // The other model, asked for with the model button.
+        state.catalog[0].installed = true;
+        state.model_card = Some(1);
+        let (text, hits) = draw(&state);
+        assert!(
+            text.contains("Download our Omnilingual-based model?"),
+            "{text}"
+        );
+        assert!(text.contains("about 1032 MB"), "{text}");
+        assert!(hits.iter().any(|h| h.action == Click::GetModel(1)));
+        // While it downloads, the bar fills in the middle of the top bar.
+        state.model_card = None;
+        state.progress = Some(("Omnilingual".into(), 516_000_000, 1_032_000_000));
+        let (text, _) = draw(&state);
+        assert!(
+            text.contains("Downloading the Omnilingual-based model"),
+            "{text}"
+        );
+        assert!(text.contains("50%"), "{text}");
+        assert_eq!(
+            progress_bar("Whisper", 1, 4),
+            "Downloading the Whisper-based model ▕████░░░░░░░░░░░░▏ 25%"
+        );
+    }
+    #[test]
+    fn the_refresh_button_offers_what_there_is_to_get() {
+        let mut state = Screen::default();
+        assert!(offer(&state).is_none());
+        state.font_offer = true;
+        assert_eq!(offer(&state).unwrap().0, Click::GetFont);
+        state.model_update = Some("2027.1.1".into());
+        assert_eq!(offer(&state).unwrap().0, Click::UpdateModel);
+        state.app_update = Some("9.9.9".into());
+        assert_eq!(offer(&state).unwrap().0, Click::UpdateApp);
+        state.model_update = Some("first".into());
+        assert_eq!(offer(&state).unwrap().0, Click::UpdateModel);
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
+        let mut hits = vec![];
+        term.draw(|f| hits = draw_plain(f, &state)).unwrap();
+        assert!(rendered_text(&term).contains("Click the arrow to get the model."));
+        assert!(hits.iter().any(|h| h.action == Click::UpdateModel));
+        // While it downloads, and once a new version waits to be started, it is Refresh again.
+        state.upgrading = true;
+        assert!(offer(&state).is_none());
+        state.upgrading = false;
+        state.restart_due = true;
+        assert!(offer(&state).is_none());
+    }
+    #[test]
     fn top_bar_chips_are_the_shape_of_the_buttons() {
         let buttons = [
             Click::Key(KeyCode::Esc),
@@ -4199,6 +4454,12 @@ mod tests {
                     .area;
                 assert_eq!(close.height, 3, "{at}");
                 for action in buttons {
+                    // With something to get, the refresh button is the way to get it.
+                    let action = if crowded && action == Click::Key(KeyCode::Char('r')) {
+                        Click::UpdateModel
+                    } else {
+                        action
+                    };
                     let Some(hit) = hits.iter().find(|h| h.action == action) else {
                         // Crowded: the engine and Contribute chips give way first.
                         assert!(
@@ -4308,9 +4569,7 @@ mod tests {
         for width in [62, 70, 80, 100] {
             let (text, clickable) = show(&state, width);
             assert!(!clickable, "{width}: no switching while transcribing");
-            for kept in ["Update app", "Get model", "◌ Transcribing"] {
-                assert!(text.contains(kept), "{width}: {kept}");
-            }
+            assert!(text.contains("◌ Transcribing"), "{width}");
         }
         assert!(show(&state, 100).0.contains("Could not hear anything."));
         state.busy = false;
@@ -4421,9 +4680,14 @@ mod tests {
                             );
                         }
                         if name == "first" {
-                            // The font chip gives way first where both do not fit.
-                            assert!(width < 50 || text.contains("Get font"), "{at}\n{text}");
-                            assert!(text.contains("Get model"), "{at}\n{text}");
+                            // The refresh button is the way to get the model.
+                            assert!(
+                                hits.iter().any(|h| h.action == Click::UpdateModel)
+                                    && !hits
+                                        .iter()
+                                        .any(|h| h.action == Click::Key(KeyCode::Char('r'))),
+                                "{at}\n{text}"
+                            );
                         }
                         if let Ok(folder) = std::env::var("TUI_LAYOUT_DUMP_DIR") {
                             std::fs::create_dir_all(&folder).unwrap();

@@ -23,14 +23,22 @@ curl -fsSL https://github.com/TripleU613/3Yiddish/releases/latest/download/insta
 irm https://github.com/TripleU613/3Yiddish/releases/latest/download/install.ps1 | iex
 ```
 
-That's it. It downloads itself, checks it isn't broken, and grabs the speech model
-(~600 MB, one time; go make a coffee).
+That's it. It installs in seconds. The first time you open it, it asks whether to
+download the speech model (about 575 MB, one time; go make a coffee) and shows the
+download as it goes.
+
+**Two models, one button.** Both are our own, trained on heimish Yiddish: one built on
+OpenAI's Whisper, one built on Meta's Omnilingual. They make different mistakes, so if one
+gets a recording wrong, click the model button at the top and try the other. The second
+one is downloaded only when you ask for it (about 1 GB). The
+Whisper-based one is the default and can use a graphics card; the Omnilingual-based one
+runs on the processor.
 
 Got a graphics card? The installer notices and gives you the GPU build, which is about ten
 times faster. A little GPU/CPU button on top shows which one is running; click it to switch.
 On an Android phone it works inside Termux too. It needs the Termux:API app (from the same
 place you got Termux) for the microphone, and the installer tells you if it is missing. Tap
-**Get font** once so the Yiddish letters are drawn properly; Termux's own font stretches
+the **arrow** at the top once so the Yiddish letters are drawn properly; Termux's own font stretches
 them. (To undo: `rm ~/.termux/font.ttf; termux-reload-settings`.)
 
 ## Use it
@@ -65,8 +73,9 @@ One more thing:
 
 ## Updates? Automatic-ish
 
-When there's a new version or a smarter model, the app shows a button. Click it. Done.
-New models only ship after they beat the old one on our test, so they only get better.
+When there's a new version or a smarter model, the Refresh button turns into an arrow. Click it. Done.
+Every model is run on our test before it ships, and the numbers go in the
+[benchmark](BENCHMARK.md), good or bad.
 Don't like the new one? `3yiddish model rollback`.
 
 ## Help it get better
@@ -86,7 +95,7 @@ Yes. It all runs on your computer, and your voice stays there unless you say oth
 - **CONTRIBUTE** tells you what it sends before you accept, and accepting it turns
   sharing on too. Sharing only sends what you transcribe after it is on, never anything
   from before.
-- Changed your mind? Click **Sharing** at the top, or run `3yiddish share off`. That
+- Changed your mind? Click **CONTRIBUTE**, then **Sharing is on**, or run `3yiddish share off`. That
   also deletes anything still waiting to be sent.
 
 Shared recordings go with their text and a few technical facts (versions, GPU or CPU,

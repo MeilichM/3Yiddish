@@ -5,7 +5,7 @@
 //! each one to fill its cell: the slim letters (vav, yud, final nun) come out as blobs. A
 //! font that has the letters at the cell's width fixes it. Termux takes its font from
 //! `~/.termux/font.ttf`, which is the user's own setting for the whole terminal, so it is
-//! only written when the user asks (the "Get font" button, or `3yiddish font`), and never
+//! only written when the user asks (the download arrow in the app, or `3yiddish font`), and never
 //! over a font that is already there.
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;

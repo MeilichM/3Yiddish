@@ -116,10 +116,9 @@ if [ "$os" = Android ]; then
     fi
   fi
   if [ ! -e "$HOME/.termux/font.ttf" ]; then
-    echo "For well-drawn Yiddish letters, tap Get font"
+    echo "For well-drawn Yiddish letters, tap the arrow at the top"
     echo "in the app (or run: 3yiddish font)."
   fi
 fi
-[ -z "${THREE_YIDDISH_SKIP_MODEL:-}" ] || exit 0
-"$dir/3yiddish" model pull || echo "Model download did not finish; run: 3yiddish model pull"
+echo "The first time it opens, it asks to download the speech model."
 echo "Start it with: 3yiddish"

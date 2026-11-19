@@ -17,6 +17,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
+      # The second engine (Omnilingual), as the computer builds of a release carry it.
+      - run: cargo clippy --locked --all-targets --features old-linux -- -D warnings
       - if: runner.os == 'Linux'
         name: Installer syntax (sh)
         run: |
