@@ -1,7 +1,7 @@
 [package]
 name = "three-yiddish"
 default-run = "3yiddish"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 publish = false
 license = "CC-BY-NC-SA-4.0"
@@ -32,6 +32,10 @@ directories = "6"
 whisper-rs = "0.16"
 ort = { version = "=2.0.0-rc.15", optional = true, default-features = false, features = ["std", "download-binaries", "tls-rustls", "api-17"] }
 hound = "3.5"
+# Unpacking the chat helper program (llama.cpp ships .tar.gz, and .zip on Windows).
+flate2 = "1"
+tar = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 symphonia = { version = "0.6", features = ["all"] }
 self-replace = "1.5"
 ratatui-image = { version = "11.1.0", default-features = false }

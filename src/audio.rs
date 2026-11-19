@@ -60,6 +60,17 @@ mod native {
         mic();
     }
 
+    /// Close the microphone; the next take opens it again. Only between takes.
+    pub fn rest() {
+        let mut slot = MIC.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(mic) = slot.take()
+            && let Ok(mut failure) = mic.failure.lock()
+        {
+            // The stream's thread ends when it sees this, and the stream closes with it.
+            failure.get_or_insert("The microphone was closed while idle".into());
+        }
+    }
+
     fn mic() -> Arc<Mic> {
         let mut slot = MIC.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(mic) = slot.as_ref()
@@ -562,6 +573,9 @@ mod termux {
 
     /// Nothing to open ahead of time: the phone's recorder starts when asked.
     pub fn warm() {}
+
+    /// Nothing is held open between takes.
+    pub fn rest() {}
 
     pub struct Recorder {
         path: PathBuf,

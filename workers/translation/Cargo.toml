@@ -1,0 +1,23 @@
+[package]
+name = "three-yiddish-translation"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "CC-BY-NC-SA-4.0"
+
+[[bin]]
+name = "3yiddish-translate"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+ct2rs-sys = { version = "0.11.2", default-features = false, features = ["ruy"] }
+sentencepiece = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+strip = true

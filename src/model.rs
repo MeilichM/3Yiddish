@@ -15,7 +15,7 @@ use std::{
 pub const DEFAULT_INDEX: &str =
     "https://github.com/TripleU613/3Yiddish/releases/download/model-latest/model.json";
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct Manifest {
     pub version: String,
     pub files: Vec<File>,
@@ -46,7 +46,7 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub also: Vec<String>,
 }
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct File {
     /// Role: "transcribe" (whisper.cpp ggml model), "vad" (Silero VAD) or "words" (the word
     /// list for the word check, one word per line).
@@ -54,6 +54,12 @@ pub struct File {
     pub name: String,
     pub size: u64,
     pub sha256: String,
+    /// Where to download it, when it is not beside the list (chat's files).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The build of the app it is for (chat's programs); absent: every build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
 }
 
 fn index_url() -> String {
@@ -188,7 +194,7 @@ pub fn switch_next(root: &Path) -> Result<(String, String)> {
     Ok(next)
 }
 
-fn safe_name(name: &str) -> bool {
+pub(crate) fn safe_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
         && name
@@ -197,7 +203,7 @@ fn safe_name(name: &str) -> bool {
         && !name.starts_with('.')
 }
 
-fn version_newer(have: &str, want: &str) -> bool {
+pub(crate) fn version_newer(have: &str, want: &str) -> bool {
     let parse = |v: &str| {
         v.trim_start_matches('v')
             .split('.')
@@ -527,7 +533,7 @@ pub(crate) fn sha256_file(path: &Path) -> Result<String> {
 }
 
 /// Blocking HTTPS GET that follows GitHub's redirect to its download CDN.
-fn http_get(url: &str) -> Result<Box<dyn Read + Send>> {
+pub(crate) fn http_get(url: &str) -> Result<Box<dyn Read + Send>> {
     let client = reqwest::blocking::Client::builder()
         .user_agent(concat!("3yiddish/", env!("CARGO_PKG_VERSION")))
         .build()?;
@@ -608,6 +614,7 @@ mod tests {
                     name: "m.bin".into(),
                     size: 1,
                     sha256: String::new(),
+                    ..Default::default()
                 }],
                 min_app_version: None,
                 scores: serde_json::Value::Null,
@@ -659,6 +666,7 @@ mod tests {
                 name: format!("{version}.bin"),
                 size: version.len() as u64,
                 sha256: sum.iter().map(|b| format!("{b:02x}")).collect(),
+                ..Default::default()
             }],
             min_app_version: None,
             scores: serde_json::Value::Null,

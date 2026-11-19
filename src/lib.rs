@@ -1,6 +1,7 @@
 pub mod art;
 pub mod asr;
 pub mod audio;
+pub mod chat;
 pub mod config;
 pub mod dictate;
 pub mod eval;

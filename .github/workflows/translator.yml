@@ -1,0 +1,55 @@
+# Builds chat's translator program (workers/translation) for every computer the app runs on.
+# Runs on a push to the `translator-build` branch or by hand; the files are kept as run
+# artifacts, and a maintainer publishes them with chat's list (chat.json) under model-latest.
+name: Translator
+on:
+  push:
+    branches: [translator-build]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, platform: linux-x86_64 }
+          - { os: ubuntu-22.04-arm, platform: linux-aarch64 }
+          - { os: macos-15, platform: macos-aarch64 }
+          - { os: macos-15-intel, platform: macos-x86_64 }
+          - { os: windows-latest, platform: windows-x86_64, ext: .exe }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - if: runner.os == 'Linux'
+        timeout-minutes: 15
+        run: |
+          for try in 1 2 3; do
+            timeout 240 sudo apt-get update -qq && timeout 300 sudo apt-get install -y -qq cmake clang && break
+            sleep 20
+          done
+      - run: rustup toolchain install 1.98.0 --profile minimal && rustup default 1.98.0
+      - name: Build
+        shell: bash
+        working-directory: workers/translation
+        run: |
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            export CARGO_TARGET_DIR='C:\t'
+            # The translation library links the C runtime statically; so must the rest.
+            export RUSTFLAGS="-C target-feature=+crt-static"
+          fi
+          cargo build --release --locked
+          mkdir -p ../../dist
+          cp "${CARGO_TARGET_DIR:-target}/release/3yiddish-translate${{ matrix.ext }}" ../../dist/3yiddish-translate-${{ matrix.platform }}${{ matrix.ext }}
+      - name: Starts
+        shell: bash
+        run: dist/3yiddish-translate-${{ matrix.platform }}${{ matrix.ext }} --help | head -3
+      - if: runner.os == 'Linux'
+        name: Linked libraries
+        run: objdump -p dist/* | grep NEEDED; objdump -T dist/* | grep -oE 'GLIBC_[0-9.]+' | sort -uV | tail -1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: translate-${{ matrix.platform }}
+          path: dist/*

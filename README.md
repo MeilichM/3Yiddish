@@ -67,6 +67,13 @@ Rather stay in the terminal?
 is. Pick another key with `3yiddish dictate --key CapsLock`. On Linux, add a keyboard shortcut in
 your desktop settings; `3yiddish dictate` prints the exact line to paste.
 
+**Talk to it (chat).** Click the speech bubble at the top. The first time, it asks whether to
+download chat (about 6.4 GB, once). Then talk or type, in Yiddish or English, and it answers
+in Yiddish. It runs on your computer like everything else: a thinking model (Gemma, by Google)
+answers, and our own translator, trained on heimish Yiddish, turns it into the Yiddish people
+actually write. It is new and it makes mistakes, so don't take its word on halacha. Phones
+don't get chat yet.
+
 One more thing:
 - **Local API.** `3yiddish serve`, then point any OpenAI-style transcription tool at
   `http://127.0.0.1:8793`. If that sentence meant nothing to you, ignore it.

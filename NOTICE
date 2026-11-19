@@ -13,5 +13,14 @@ require these notices to accompany them:
   large-v3-turbo as above, and ivrit-ai/yi-whisper-large-v3-turbo, Apache
   License 2.0, by ivrit.ai. See licenses/ivrit-ai-Apache-2.0.txt.
 
+Chat (downloaded only when asked for) uses:
+
+- Our translator, a fine-tune of Meta's NLLB-200 (distilled 1.3B), which is
+  licensed CC BY-NC 4.0, by Meta Platforms, Inc.
+- Gemma 4 E4B, downloaded from Hugging Face. Gemma is provided under and
+  subject to the Gemma Terms of Use found at ai.google.dev/gemma/terms.
+- llama.cpp's server program, MIT License, Copyright (c) 2023-2026 The ggml
+  authors. See licenses/llama.cpp-MIT.txt.
+
 The app runs the Omnilingual-based model with ONNX Runtime, MIT License,
 Copyright (c) Microsoft Corporation. See licenses/onnxruntime-MIT.txt.

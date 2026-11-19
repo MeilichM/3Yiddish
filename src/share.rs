@@ -22,7 +22,7 @@ pub const WHAT: &str = "What you transcribe here, your recordings and files with
     is kept privately and used to test, and maybe later to improve, Yiddish speech to text.";
 /// How to switch it off.
 pub const OFF: &str =
-    "You can switch it off any time with Sharing at the top, or: 3yiddish share off";
+    "You can switch it off any time in Contribute (the heart at the top), or: 3yiddish share off";
 
 /// Items waiting that make a batch.
 pub const BATCH: usize = 10;

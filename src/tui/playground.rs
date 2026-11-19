@@ -2902,6 +2902,25 @@ pub(super) fn draw_consent(frame: &mut Frame, region: Rect, hits: &mut Vec<Hit>)
 }
 /// The sharing card: the first-run question (No thanks is the main button: the default is
 /// no), or what is being shared with Stop sharing.
+/// The question to download chat.
+pub(super) fn draw_chat_card(frame: &mut Frame, size: u64, region: Rect, hits: &mut Vec<Hit>) {
+    let text = format!(
+        "To talk with it, the app needs two more models: a thinking model (Gemma, by Google) and our translator trained on heimish Yiddish, about {:.1} GB in all. They are free, downloaded once, and run on this computer.",
+        size as f64 / 1e9
+    );
+    question(
+        frame,
+        region,
+        hits,
+        "Download chat?",
+        (&[], &[text.as_str()]),
+        [
+            (Line::from("Not now"), surface(), Click::ModelNotNow, true),
+            (Line::from("Download"), THEME_ACCENT, Click::GetChat, true),
+        ],
+    );
+}
+
 /// The question to download a model: the first one (nothing works without it), or another
 /// one asked for with the model button.
 pub(super) fn draw_model_card(
