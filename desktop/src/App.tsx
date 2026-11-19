@@ -241,13 +241,21 @@ export default function App() {
     setEntries((all) => all.map((e) => (e.clip.id === id ? { ...e, ...patch } : e)));
 
   /** Transcribe in order, one at a time (the engine does one at a time anyway). */
-  const transcribe = useCallback((entry: Entry) => {
+  /** `model`: transcribe with this installed model (Transcribe again's menu); else the active one. */
+  const transcribe = useCallback((entry: Entry, model?: string) => {
     update(entry.clip.id, { state: "transcribing", error: undefined });
     queue.current = queue.current.then(async () => {
       try {
-        const t = await api.transcribe(entry.clip.path, entry.recorded);
-        update(entry.clip.id, { state: "done", text: t.text, ms: t.ms, compute: t.compute });
-        setStatus((s) => (s ? { ...s, compute: t.compute } : s));
+        const t = await api.transcribe(entry.clip.path, entry.recorded, model);
+        update(entry.clip.id, {
+          state: "done",
+          text: t.text,
+          ms: t.ms,
+          compute: t.compute,
+          model: t.model ?? undefined,
+        });
+        // The header's CPU/GPU follows the active model, not one used just this once.
+        if (!model) setStatus((s) => (s ? { ...s, compute: t.compute } : s));
       } catch (e) {
         update(entry.clip.id, { state: "error", error: message(e) });
       }
@@ -770,7 +778,9 @@ export default function App() {
               <EntryView
                 key={entry.clip.id}
                 entry={entry}
-                onRetry={() => transcribe(entry)}
+                models={status?.models ?? []}
+                activeModel={status?.model ?? null}
+                onRetry={(model) => transcribe(entry, model)}
                 onRemove={() => remove(entry)}
                 onContribute={() => contributeEntry(entry)}
               />

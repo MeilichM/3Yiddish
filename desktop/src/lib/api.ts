@@ -49,6 +49,8 @@ export interface Transcript {
   text: string;
   ms: number;
   compute: Compute;
+  /** The model that wrote it (its version). */
+  model: string | null;
 }
 
 export interface Level {
@@ -165,7 +167,9 @@ export const api = {
     invoke<Clip>("import_bytes", new Uint8Array(await file.arrayBuffer()), {
       headers: { "x-file-name": encodeURIComponent(file.name) },
     }),
-  transcribe: (path: string, recorded: boolean) => invoke<Transcript>("transcribe", { path, recorded }),
+  /** `model`: an installed model's version to transcribe with; left out, the active one. */
+  transcribe: (path: string, recorded: boolean, model?: string) =>
+    invoke<Transcript>("transcribe", { path, recorded, model: model ?? null }),
   /** A URL the window can play the file from (streamed from disk). */
   audioUrl: async (path: string) => {
     await invoke<void>("allow_audio", { path });

@@ -34,6 +34,9 @@ const PEAKS: usize = 56;
 #[derive(Default)]
 pub(crate) struct Core {
     engine: Mutex<Option<Arc<Engine>>>,
+    /// Another installed model, loaded to transcribe a message again with it (Transcribe again's
+    /// model menu): its version and engine. The active model is not changed.
+    other: Mutex<Option<(String, Arc<Engine>)>>,
     /// The take being recorded (from the window or from push-to-talk) and when it began.
     recording: Mutex<Option<(Recorder, Instant)>>,
     /// The take was started by the push-to-talk shortcut.
@@ -72,8 +75,38 @@ impl Core {
         *slot = Some(engine.clone());
         Ok(engine)
     }
+    /// The engine for one installed model: the active one's, or another kept loaded beside it.
+    fn engine_for(&self, version: Option<&str>) -> anyhow::Result<Arc<Engine>> {
+        let root = paths::models();
+        let active = model::current(&root).map(|(v, ..)| v);
+        let Some(version) = version.filter(|v| active.as_deref() != Some(*v)) else {
+            return self.engine();
+        };
+        let mut slot = self.other.lock().map_err(|_| anyhow::anyhow!("engine lock"))?;
+        if let Some((v, engine)) = slot.as_ref()
+            && v == version
+        {
+            return Ok(engine.clone());
+        }
+        *slot = None; // one model at a time beside the active one
+        if !model::installed(&root).iter().any(|(v, _)| v == version) {
+            anyhow::bail!("That model is no longer on this computer.");
+        }
+        let dir = root.join(version);
+        let manifest: model::Manifest = serde_json::from_slice(&std::fs::read(dir.join("model.json"))?)?;
+        let file = |role: &str| {
+            manifest.files.iter().find(|f| f.role == role).map(|f| dir.join(&f.name)).filter(|p| p.is_file())
+        };
+        let transcribe = file("transcribe").ok_or_else(|| anyhow::anyhow!("That model is incomplete."))?;
+        let engine = Arc::new(Engine::load(&transcribe, file("vad").as_deref(), asr::preferred())?);
+        *slot = Some((version.to_owned(), engine.clone()));
+        Ok(engine)
+    }
     fn drop_engine(&self) {
         if let Ok(mut slot) = self.engine.lock() {
+            *slot = None;
+        }
+        if let Ok(mut slot) = self.other.lock() {
             *slot = None;
         }
     }
@@ -175,6 +208,8 @@ pub(crate) struct Transcript {
     text: String,
     ms: u64,
     compute: &'static str,
+    /// The model that wrote it (its version).
+    model: Option<String>,
 }
 
 /// Keep a finished take as a WAV file: the voice note.
@@ -198,11 +233,20 @@ pub(crate) fn save_take(core: &Core, pcm: Vec<f32>) -> Out<Clip> {
 
 /// Transcribe one file. `recorded`: made in the app (else a file brought in), which sharing
 /// is told when it is on.
-pub(crate) fn transcribe_blocking(core: &Core, path: &str, recorded: bool) -> Out<Transcript> {
+/// `version`: the installed model to transcribe with; None for the active one.
+pub(crate) fn transcribe_blocking(
+    core: &Core,
+    path: &str,
+    recorded: bool,
+    version: Option<&str>,
+) -> Out<Transcript> {
     let began = Instant::now();
     let mut engine_name = None;
     let result = (|| {
-        let engine = core.engine().map_err(fail)?;
+        let engine = core.engine_for(version).map_err(fail)?;
+        let model = version
+            .map(str::to_owned)
+            .or_else(|| model::current(&paths::models()).map(|(v, ..)| v));
         engine_name = Some(engine.compute().name());
         let pcm = core.decode(Path::new(path)).map_err(fail)?;
         let began = Instant::now();
@@ -213,6 +257,7 @@ pub(crate) fn transcribe_blocking(core: &Core, path: &str, recorded: bool) -> Ou
             text: text.trim().to_owned(),
             ms: began.elapsed().as_millis() as u64,
             compute: engine.compute().name(),
+            model,
         })
     })();
     contribute::shared(
@@ -521,9 +566,16 @@ fn percent_decode(s: &str) -> String {
 }
 
 #[tauri::command]
-async fn transcribe(path: String, recorded: bool, core: Shared<'_>) -> Out<Transcript> {
+async fn transcribe(
+    path: String,
+    recorded: bool,
+    model: Option<String>,
+    core: Shared<'_>,
+) -> Out<Transcript> {
     let core = core.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || transcribe_blocking(&core, &path, recorded))
+    tauri::async_runtime::spawn_blocking(move || {
+        transcribe_blocking(&core, &path, recorded, model.as_deref())
+    })
         .await
         .map_err(fail)?
 }

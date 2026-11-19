@@ -1,8 +1,15 @@
-import { Check, Copy, FileAudio, RotateCcw, Send, Trash2 } from "lucide-react";
+import { Check, ChevronDown, Copy, FileAudio, RotateCcw, Send, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import type { Clip, Compute } from "@/lib/api";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { VoiceNote } from "@/components/voice-note";
 
@@ -15,6 +22,8 @@ export interface Entry {
   text?: string;
   ms?: number;
   compute?: Compute;
+  /** The model that wrote the text (its version). */
+  model?: string;
   error?: string;
 }
 
@@ -24,17 +33,25 @@ function when(at: number) {
 
 export function EntryView({
   entry,
+  models,
+  activeModel,
   onRetry,
   onRemove,
   onContribute,
 }: {
   entry: Entry;
-  onRetry: () => void;
+  /** The installed models; with more than one, Transcribe again asks which. */
+  models: { version: string; label: string }[];
+  activeModel: string | null;
+  /** Transcribe again, with this model's version; none: the active model. */
+  onRetry: (model?: string) => void;
   onRemove: () => void;
   /** Open this one in Contribute, to fix and send (whether or not the Contribute switch is on). */
   onContribute?: () => void;
 }) {
   const [copied, setCopied] = useState(false);
+  /** The name of a model as the model menu gives it: its label, or its version without one. */
+  const label = (version?: string) => models.find((m) => m.version === version)?.label ?? version;
 
   async function copy() {
     if (!entry.text) return;
@@ -76,7 +93,7 @@ export function EntryView({
         {entry.state === "error" && (
           <div className="flex items-center justify-between gap-3 px-4 py-3 text-sm">
             <span className="text-destructive">{entry.error}</span>
-            <Button size="sm" variant="outline" onClick={onRetry}>
+            <Button size="sm" variant="outline" onClick={() => onRetry()}>
               <RotateCcw /> Try again
             </Button>
           </div>
@@ -102,14 +119,49 @@ export function EntryView({
                   </TooltipTrigger>
                   <TooltipContent>Copy</TooltipContent>
                 </Tooltip>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button size="icon" variant="ghost" className="size-7" onClick={onRetry} aria-label="Transcribe again">
-                      <RotateCcw />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>Transcribe again</TooltipContent>
-                </Tooltip>
+                {models.length > 1 ? (
+                  // More than one model here: pick which one transcribes it again.
+                  <DropdownMenu>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" className="h-7 gap-0.5 px-1.5" aria-label="Transcribe again with…">
+                            <RotateCcw />
+                            <ChevronDown className="size-3 opacity-60" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                      </TooltipTrigger>
+                      <TooltipContent>Transcribe again with…</TooltipContent>
+                    </Tooltip>
+                    <DropdownMenuContent align="start" className="min-w-52">
+                      <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+                        Transcribe again with
+                      </DropdownMenuLabel>
+                      {models.map((m) => (
+                        <DropdownMenuItem key={m.version} onSelect={() => onRetry(m.version === activeModel ? undefined : m.version)}>
+                          <span className="flex flex-col">
+                            {m.label}
+                            {m.label !== m.version && (
+                              <span className="text-xs text-muted-foreground tabular-nums">{m.version}</span>
+                            )}
+                          </span>
+                          <span className="ms-auto ps-4 text-xs text-muted-foreground">
+                            {m.version === entry.model ? "wrote this" : m.version === activeModel ? "in use" : ""}
+                          </span>
+                        </DropdownMenuItem>
+                      ))}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                ) : (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button size="icon" variant="ghost" className="size-7" onClick={() => onRetry()} aria-label="Transcribe again">
+                        <RotateCcw />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Transcribe again</TooltipContent>
+                  </Tooltip>
+                )}
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button size="icon" variant="ghost" className="size-7" onClick={onRemove} aria-label="Remove">
@@ -133,6 +185,7 @@ export function EntryView({
               <span className="flex items-center gap-1.5 px-2 tabular-nums">
                 {entry.ms != null && (
                   <span className="opacity-0 transition-opacity group-hover:opacity-100">
+                    {models.length > 1 && entry.model && <>{label(entry.model)} · </>}
                     {(entry.ms / 1000).toFixed(1)}s on {entry.compute?.toUpperCase()} ·
                   </span>
                 )}
