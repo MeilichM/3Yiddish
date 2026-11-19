@@ -1,0 +1,75 @@
+# Chat end to end on a fresh home: download it from a chat list, send one message through the
+# service, and check its helper programs stop with the service and are cleaned up after a hard
+# kill. Run by hand (or on a push to `translator-build`) before a chat list is published.
+name: Chat smoke
+on:
+  push:
+    branches: [translator-build]
+  workflow_dispatch:
+    inputs:
+      list:
+        description: Chat list to test
+        default: https://github.com/TripleU613/3Yiddish/releases/download/model-latest/chat-next.json
+permissions:
+  contents: read
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-15, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      THREE_YIDDISH_CHAT_INDEX: ${{ inputs.list || 'https://github.com/TripleU613/3Yiddish/releases/download/model-latest/chat-next.json' }}
+    steps:
+      - uses: actions/checkout@v7
+      - if: runner.os == 'Linux'
+        timeout-minutes: 15
+        run: for try in 1 2 3; do timeout 240 sudo apt-get update -qq && timeout 300 sudo apt-get install -y -qq libasound2-dev cmake clang && break; sleep 20; done
+      - run: rustup toolchain install 1.98.0 --profile minimal && rustup default 1.98.0
+      - name: Build
+        shell: bash
+        run: |
+          [[ "$RUNNER_OS" == Windows ]] && export CARGO_TARGET_DIR='C:\t'
+          cargo build --release --locked --bin 3yiddish
+          mkdir -p bin && cp "${CARGO_TARGET_DIR:-target}/release/3yiddish$([[ $RUNNER_OS == Windows ]] && echo .exe)" bin/
+      - name: Download chat
+        shell: bash
+        run: |
+          export THREE_YIDDISH_HOME="$RUNNER_TEMP/home"; mkdir -p "$THREE_YIDDISH_HOME/state"
+          start=$(date +%s); bin/3yiddish model chat; echo "download took $(( $(date +%s) - start )) s"
+          du -sh "$THREE_YIDDISH_HOME/state/chat"
+      - name: One message, then stop
+        shell: bash
+        run: |
+          export THREE_YIDDISH_HOME="$RUNNER_TEMP/home" THREE_YIDDISH_COMPUTE=cpu
+          cd "$THREE_YIDDISH_HOME"
+          echo '[]' > knowledge.json
+          printf '%s\n' 'listen = "127.0.0.1:8811"' 'knowledge_path = "knowledge.json"' 'default_reasoner = "local"' \
+            '[schmooze]' 'url = "http://127.0.0.1:11434/v1/chat/completions"' 'model = "SCHMOOZE_MODEL_PLACEHOLDER"' \
+            '[reasoners.local]' 'url = "http://127.0.0.1:11434/v1/chat/completions"' 'model = "LOCAL_REASONER_PLACEHOLDER"' > fresh.toml
+          helpers() { if [[ $RUNNER_OS == Windows ]]; then tasklist | grep -ciE "llama-server|3yiddish-transl" || true; else pgrep -f "llama-server|3yiddish-translate" | wc -l | tr -d " "; fi; }
+          "$GITHUB_WORKSPACE/bin/3yiddish" --config fresh.toml serve > serve.log 2>&1 & SERVE=$!
+          for i in $(seq 30); do curl -fs http://127.0.0.1:8811/v1/status > /dev/null && break; sleep 1; done
+          curl -s http://127.0.0.1:8811/v1/status | python3 -c "import sys,json; print(json.load(sys.stdin)['components']['schmooze'])"
+          start=$(date +%s)
+          curl -s -m 1200 http://127.0.0.1:8811/v1/chat/completions -H 'content-type: application/json' \
+            -d '{"messages":[{"role":"user","content":"What should I cook for supper tonight?"}]}' > answer.json
+          echo "first answer took $(( $(date +%s) - start )) s"
+          python3 -c "import json; d=json.load(open('answer.json', encoding='utf-8')); print('ANSWER' if 'choices' in d else 'NO ANSWER', json.dumps(d, ensure_ascii=True)[:400])"
+          start=$(date +%s)
+          curl -s -m 1200 http://127.0.0.1:8811/v1/chat/completions -H 'content-type: application/json' \
+            -d '{"messages":[{"role":"user","content":"Who was the Baal Shem Tov?"}]}' > answer2.json
+          echo "second answer took $(( $(date +%s) - start )) s"
+          echo "helpers while chatting: $(helpers)"
+          # A hard kill (like a crash): the next start cleans up what it left.
+          kill -9 $SERVE 2>/dev/null || taskkill //PID $SERVE //F || true
+          sleep 3; echo "helpers after a hard kill: $(helpers)"
+          "$GITHUB_WORKSPACE/bin/3yiddish" --config fresh.toml serve > serve2.log 2>&1 & SERVE=$!
+          sleep 8; echo "helpers after the next start: $(helpers)"
+          echo "pids file: $(cat state/chat/running 2>/dev/null || echo none)"; head -5 serve2.log
+          [[ $RUNNER_OS == Windows ]] || ps -A -o pid,command | grep -E "llama-server|3yiddish-transl" | grep -v grep | cut -c1-150 || true
+          kill $SERVE 2>/dev/null || taskkill //PID $SERVE //F || true
+          tail -5 state/chat/logs/thinker.log || true
+          python3 -c "import json,sys; d=json.load(open('answer.json', encoding='utf-8')); sys.exit(0 if 'choices' in d else 1)"

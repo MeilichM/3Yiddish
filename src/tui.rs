@@ -33,8 +33,12 @@ enum Update {
     Upgrade(String, bool),
     /// The models that can be picked (published or on disk), found in the background.
     Catalog(Vec<crate::model::Listing>),
-    /// A model download under way: its name, bytes done and bytes in all.
+    /// A download under way: what it is, bytes done and bytes in all.
     Progress(String, u64, u64),
+    /// How much chat takes to download here, found in the background.
+    ChatSize(Option<u64>),
+    /// Chat finished downloading: the app moves to it.
+    ChatReady,
     /// An audio file chosen with the attach button (None: cancelled or no picker).
     Picked(Option<String>),
     /// A finished take: its file, length in seconds and loudness over time (for the voice
@@ -239,8 +243,12 @@ struct Screen {
     catalog: Vec<crate::model::Listing>,
     /// The question to download the model at this place in `catalog`.
     model_card: Option<usize>,
-    /// A model download under way: its name, bytes done and bytes in all.
+    /// A download under way: what it is, bytes done and bytes in all.
     progress: Option<(String, u64, u64)>,
+    /// How much chat takes to download here (None: not known, or chat does not run here).
+    chat_size: Option<u64>,
+    /// The question to download chat.
+    chat_card: bool,
     /// Termux with the phone's own font: offer the font in which Yiddish letters read well.
     font_offer: bool,
     upgrading: bool,
@@ -578,6 +586,8 @@ enum Click {
     GetModel(usize),
     /// Leave the download question.
     ModelNotNow,
+    /// Download chat, from its question.
+    GetChat,
     /// Chat, or write down what is said.
     Mode,
     GetFont,
@@ -700,12 +710,12 @@ async fn chat(
         .context("No reply")?;
     Ok(json!({"text": reply}))
 }
-/// "Downloading the Whisper-based model ▕██████░░░░░░░░░░▏ 37%".
-fn progress_bar(label: &str, done: u64, total: u64) -> String {
+/// "Downloading our Whisper-based model ▕██████░░░░░░░░░░▏ 37%".
+fn progress_bar(what: &str, done: u64, total: u64) -> String {
     let share = (done as f64 / total.max(1) as f64).clamp(0.0, 1.0);
     let filled = (share * 16.0).round() as usize;
     format!(
-        "Downloading the {label}-based model ▕{}{}▏ {}%",
+        "Downloading {what} ▕{}{}▏ {}%",
         "█".repeat(filled),
         "░".repeat(16 - filled),
         (share * 100.0) as u32
@@ -731,7 +741,16 @@ fn offer(state: &Screen) -> Option<(Click, &'static str)> {
         None
     }
 }
-/// Does the service have a chat model set up? Only then is there a Chat button.
+/// Chat runs here but is not downloaded yet: the Chat button asks to download it.
+fn chat_missing(state: &Screen) -> bool {
+    state.status.as_ref().is_some_and(|s| {
+        s.pointer("/components/schmooze/status")
+            .and_then(Value::as_str)
+            == Some("not-installed")
+    })
+}
+/// Does the service have a chat model set up, or one to download? Then there is a Chat
+/// button.
 fn chat_offered(state: &Screen) -> bool {
     state.status.as_ref().is_some_and(|s| {
         s.pointer("/components/schmooze/status")
@@ -753,6 +772,8 @@ fn switch_mode(state: &mut Screen) {
 fn offered(hits: &[Hit], action: PlayClick) -> bool {
     hits.iter().any(|h| h.action == Click::Play(action))
 }
+/// How long the microphone stays open after a take, so the next one starts at once.
+const MIC_REST: Duration = Duration::from_secs(120);
 fn recording(state: &Screen) -> bool {
     state.recording.is_some() || state.demo_rec.is_some()
 }
@@ -979,6 +1000,8 @@ pub async fn run(client: reqwest::Client, base: String) -> Result<()> {
             .send()
             .await;
     }
+    // Chat's helpers end with the app (the refreshed app starts them again when needed).
+    crate::chat::stop();
     if let Some(path) = exit.refresh {
         let error = reload(&path);
         let _ = std::fs::remove_file(path);
@@ -1005,6 +1028,8 @@ fn terminal(
     terminal.clear()?;
     // Before mouse reporting starts, so nothing else arrives in the terminal's answers.
     init_graphics();
+    // The microphone opens for each take and closes as soon as it ends, so an idle app
+    // holds nothing open.
     crossterm::execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     // Background check for a newer app and model; never blocks the screen, silent offline.
     let check_tx = tx.clone();
@@ -1030,6 +1055,9 @@ fn terminal(
         let _ = check_tx.send(Update::Catalog(crate::model::catalog(
             &crate::paths::models(),
         )));
+        if crate::chat::installed().is_none() {
+            let _ = check_tx.send(Update::ChatSize(crate::chat::size().ok().flatten()));
+        }
     });
     let mut state = Screen {
         model_switch: model_switch_label(&[]),
@@ -1108,8 +1136,22 @@ fn terminal(
             },
         );
     }
+    // When something last happened: for a short while after, the screen keeps its full pace.
+    let mut stirred = std::time::Instant::now();
+    // The microphone was last used then (None: it is closed).
+    let mut mic_used: Option<std::time::Instant> = None;
     loop {
+        if recording(&state) {
+            mic_used = Some(std::time::Instant::now());
+        } else if mic_used.is_some_and(|at| at.elapsed() >= MIC_REST) {
+            crate::audio::rest();
+            mic_used = None;
+        }
         while let Ok(update) = updates.try_recv() {
+            // The regular status look every second is not news.
+            if !matches!(update, Update::Status(_) | Update::Pair(_, false)) {
+                stirred = std::time::Instant::now();
+            }
             match update {
                 Update::Status(v) => state.status = Some(v),
                 Update::Pair(result, answer) => {
@@ -1152,6 +1194,12 @@ fn terminal(
                 }
                 Update::Progress(label, done, total) => {
                     state.progress = Some((label, done, total));
+                }
+                Update::ChatSize(size) => state.chat_size = size,
+                Update::ChatReady => {
+                    if !state.chat {
+                        switch_mode(&mut state);
+                    }
                 }
                 Update::Upgrade(text, finished) => {
                     state.notice = text;
@@ -1337,10 +1385,23 @@ fn terminal(
         let key = if let Some(code) = state.pending_key.take() {
             KeyEvent::new(code, KeyModifiers::NONE)
         } else {
-            // The screen animates, so it redraws twenty times a second.
-            if !event::poll(Duration::from_millis(50))? {
+            // While something moves (a take, a transcription, playback, a download, the
+            // moments after a click) the screen redraws twenty times a second; at rest, once
+            // a second, so an idle app costs next to nothing.
+            let lively = recording(&state)
+                || state.busy
+                || state.upgrading
+                || state.progress.is_some()
+                || state.voice_play.is_some()
+                || state.playback.is_some()
+                || state.play.thinking
+                || state.play.recording
+                || stirred.elapsed() < Duration::from_secs(3);
+            let pace = if lively { 50 } else { 1000 };
+            if !event::poll(Duration::from_millis(pace))? {
                 continue;
             }
+            stirred = std::time::Instant::now();
             match event::read()? {
                 Event::Key(key) => {
                     typed = true;
@@ -1405,13 +1466,18 @@ fn terminal(
             }
         }
         // The download question: Enter downloads, Esc is Not now; nothing is typed.
-        if let Some(index) = state.model_card
+        let asking = if state.chat_card {
+            Some(Click::GetChat)
+        } else {
+            state.model_card.map(Click::GetModel)
+        };
+        if let Some(get) = asking
             && state.share_card.is_none()
             && !recording(&state)
         {
             let control = key.modifiers.contains(KeyModifiers::CONTROL);
             let answer = match key.code {
-                KeyCode::Enter => Click::GetModel(index),
+                KeyCode::Enter => get,
                 KeyCode::Esc => Click::ModelNotNow,
                 KeyCode::Char('r' | 'c') if control => Click::Key(KeyCode::Null),
                 _ => continue,
@@ -1745,6 +1811,37 @@ fn click(
             });
             return Ok(None);
         }
+        Click::Mode if !state.chat && chat_missing(state) => {
+            // Chat is not here yet: ask before downloading it.
+            match state.chat_size {
+                Some(_) => state.chat_card = true,
+                None => {
+                    state.notice =
+                        "Chat cannot be downloaded right now; check the connection.".into()
+                }
+            }
+            return Ok(None);
+        }
+        Click::GetChat => {
+            state.chat_card = false;
+            state.upgrading = true;
+            state.progress = Some(("chat".into(), 0, state.chat_size.unwrap_or(0)));
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let result = crate::chat::pull(&mut |done, total| {
+                    let _ = tx.send(Update::Progress("chat".into(), done, total));
+                });
+                let text = match result {
+                    Ok(()) => {
+                        let _ = tx.send(Update::ChatReady);
+                        "Chat is ready: talk or type, and it answers in Yiddish.".to_owned()
+                    }
+                    Err(e) => crate::model::plain_error(&e),
+                };
+                let _ = tx.send(Update::Upgrade(text, true));
+            });
+            return Ok(None);
+        }
         Click::Mode => {
             switch_mode(state);
             state.notice = if state.chat {
@@ -1779,6 +1876,7 @@ fn click(
         }
         Click::ModelNotNow => {
             state.model_card = None;
+            state.chat_card = false;
             return Ok(None);
         }
         Click::GetModel(index) => {
@@ -1787,7 +1885,8 @@ fn click(
                 return Ok(None);
             };
             state.upgrading = true;
-            state.progress = Some((pick.label.clone(), 0, pick.size));
+            let what = format!("our {}-based model", pick.label);
+            state.progress = Some((what.clone(), 0, pick.size));
             let tx = tx.clone();
             std::thread::spawn(move || {
                 let root = crate::paths::models();
@@ -1800,8 +1899,7 @@ fn click(
                             file = name.to_owned();
                         }
                         last = (done, total);
-                        let _ =
-                            tx.send(Update::Progress(pick.label.clone(), base + done, pick.size));
+                        let _ = tx.send(Update::Progress(what.clone(), base + done, pick.size));
                     });
                 let text = match result {
                     Ok(_) => format!("Now using our {}-based model.", pick.label),
@@ -3251,6 +3349,21 @@ fn draw_plain(frame: &mut Frame, state: &Screen) -> Vec<Hit> {
         );
         return hits;
     }
+    if state.chat_card {
+        let top = area.y + 4;
+        playground::draw_chat_card(
+            frame,
+            state.chat_size.unwrap_or(0),
+            Rect::new(
+                area.x,
+                top,
+                area.width,
+                screen.height.saturating_sub(top + 1),
+            ),
+            &mut hits,
+        );
+        return hits;
+    }
     if let Some(model) = state
         .model_card
         .and_then(|i| state.catalog.get(i).map(|m| (i, m)))
@@ -4325,6 +4438,33 @@ mod tests {
         assert_eq!(again.input, "a draft");
     }
     #[test]
+    fn chat_is_offered_for_download_and_asks_first() {
+        let mut state = Screen::default();
+        // A fresh install: the service says chat runs here but is not downloaded.
+        state.status = Some(json!({"components": {"schmooze": {"status": "not-installed"}}}));
+        assert!(chat_offered(&state) && chat_missing(&state));
+        let draw = |state: &Screen| {
+            let mut term =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+            let mut hits = vec![];
+            term.draw(|f| hits = draw_plain(f, state)).unwrap();
+            (rendered_text(&term), hits)
+        };
+        // The chat button is in the top bar.
+        assert!(draw(&state).1.iter().any(|h| h.action == Click::Mode));
+        state.chat_size = Some(6_398_000_000);
+        state.chat_card = true;
+        let (text, hits) = draw(&state);
+        assert!(text.contains("Download chat?"), "{text}");
+        assert!(text.contains("about 6.4 GB"), "{text}");
+        assert!(hits.iter().any(|h| h.action == Click::GetChat));
+        assert!(hits.iter().any(|h| h.action == Click::ModelNotNow));
+        // Once downloaded, the same button switches to chat.
+        state.chat_card = false;
+        state.status = Some(json!({"components": {"schmooze": {"status": "local"}}}));
+        assert!(chat_offered(&state) && !chat_missing(&state));
+    }
+    #[test]
     fn a_model_is_downloaded_only_after_saying_yes() {
         let listing = |version: &str, label: &str, size: u64, installed| crate::model::Listing {
             version: version.into(),
@@ -4363,16 +4503,20 @@ mod tests {
         assert!(hits.iter().any(|h| h.action == Click::GetModel(1)));
         // While it downloads, the bar fills in the middle of the top bar.
         state.model_card = None;
-        state.progress = Some(("Omnilingual".into(), 516_000_000, 1_032_000_000));
+        state.progress = Some((
+            "our Omnilingual-based model".into(),
+            516_000_000,
+            1_032_000_000,
+        ));
         let (text, _) = draw(&state);
         assert!(
-            text.contains("Downloading the Omnilingual-based model"),
+            text.contains("Downloading our Omnilingual-based model"),
             "{text}"
         );
         assert!(text.contains("50%"), "{text}");
         assert_eq!(
-            progress_bar("Whisper", 1, 4),
-            "Downloading the Whisper-based model ▕████░░░░░░░░░░░░▏ 25%"
+            progress_bar("chat", 1, 4),
+            "Downloading chat ▕████░░░░░░░░░░░░▏ 25%"
         );
     }
     #[test]

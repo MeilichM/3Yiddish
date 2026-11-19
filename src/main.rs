@@ -37,6 +37,8 @@ enum ModelAction {
     Status,
     /// Switch back to the previous model.
     Rollback,
+    /// Download chat (its thinking model, translator and their programs) to use it here.
+    Chat,
 }
 #[derive(Subcommand)]
 enum Command {
@@ -158,6 +160,32 @@ async fn response(response: reqwest::Response) -> Result<Value> {
 }
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Chat's helpers hold a model in memory: they end with the app even when it is ended from
+    // outside (its terminal closed, a kill), not only when it quits.
+    #[cfg(unix)]
+    tokio::spawn(async {
+        use tokio::signal::unix::{SignalKind, signal};
+        let (Ok(mut term), Ok(mut hup)) = (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::hangup()),
+        ) else {
+            return;
+        };
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = hup.recv() => {}
+        }
+        three_yiddish::chat::stop();
+        std::process::exit(143);
+    });
+    #[cfg(windows)]
+    tokio::spawn(async {
+        if let Ok(mut close) = tokio::signal::windows::ctrl_close()
+            && close.recv().await.is_some()
+        {
+            three_yiddish::chat::stop();
+        }
+    });
     // A bare `3yiddish` opens the app.
     let mut args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     if args.len() == 1 {
@@ -405,6 +433,21 @@ async fn main() -> Result<()> {
             }
             ModelAction::Rollback => {
                 println!("Now using {}", three_yiddish::model::rollback(&models)?);
+            }
+            ModelAction::Chat => {
+                let mut last = 101;
+                tokio::task::spawn_blocking(move || {
+                    three_yiddish::chat::pull(&mut |done, total| {
+                        let pct = done * 100 / total.max(1);
+                        if pct != last {
+                            last = pct;
+                            eprint!("\rChat: {pct}%   ");
+                        }
+                    })
+                })
+                .await??;
+                eprintln!();
+                println!("Chat is downloaded; open the app and click the chat button.");
             }
         }
         return Ok(());
@@ -698,6 +741,8 @@ fn online(error: anyhow::Error) -> anyhow::Error {
 /// foreground (and says where it listens); the TUI starts it in the background when nothing
 /// is listening yet.
 async fn serve(config: Config, announce: bool) -> Result<()> {
+    // Chat helpers a crashed run left behind go first, before anything else can fail.
+    tokio::task::spawn_blocking(three_yiddish::chat::stop_stale).await?;
     let listen = config.listen;
     let app = App::new(config)?;
     // A phone link left on Tailscale by a run that ended badly is taken down first.
@@ -709,6 +754,16 @@ async fn serve(config: Config, announce: bool) -> Result<()> {
         eprintln!("3Yiddish listening on {listen}; request content and credentials are not logged");
     }
     let phone = app.phone_hub();
+    // Chat's helpers stop after ten quiet minutes, so an idle app holds no model in memory.
+    tokio::spawn(async {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            let _ = tokio::task::spawn_blocking(|| {
+                three_yiddish::chat::rest_if_idle(std::time::Duration::from_secs(600))
+            })
+            .await;
+        }
+    });
     axum::serve(listener, router(app))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
@@ -716,5 +771,6 @@ async fn serve(config: Config, announce: bool) -> Result<()> {
         .await?;
     // A paired phone's page goes off Tailscale with the service; its link is kept.
     phone.shutdown().await;
+    three_yiddish::chat::stop();
     Ok(())
 }

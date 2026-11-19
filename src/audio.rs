@@ -60,6 +60,10 @@ mod native {
     /// The open microphone, and how many takes are using it.
     static MIC: Mutex<Option<(Arc<Mic>, usize)>> = Mutex::new(None);
 
+    /// Nothing to do: the microphone already closes as soon as the last take ends (the
+    /// terminal app calls this after a quiet while).
+    pub fn rest() {}
+
     /// The microphone for one more take: the open one, or a newly opened one.
     fn mic() -> Arc<Mic> {
         let mut slot = MIC.lock().unwrap_or_else(|e| e.into_inner());
@@ -589,6 +593,9 @@ mod termux {
             None => Ok(()),
         }
     }
+
+    /// Nothing is held open between takes.
+    pub fn rest() {}
 
     pub struct Recorder {
         path: PathBuf,

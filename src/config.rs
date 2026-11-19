@@ -73,8 +73,10 @@ pub struct Config {
     #[serde(default = "timeout")]
     pub timeout_seconds: u64,
 }
+/// Long enough for chat on a computer without a graphics card, where one answer can take
+/// minutes (the app itself waits ten).
 fn timeout() -> u64 {
-    120
+    600
 }
 /// Transcribe-only defaults for a fresh install: no config file needed. Chat and Speak stay
 /// placeholders (disabled) until a config file wires real local endpoints.
