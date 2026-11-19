@@ -1,9 +1,11 @@
-/** What 3Yiddish is built on (the repository's NOTICE), and each one's license. */
+/** What 3Yiddish is built on (the repository's NOTICE, as of 0.5.0), and each one's license. */
 const CREDITS: [name: string, license: string][] = [
   ["3Yiddish, © 2026 TripleU613", "CC BY-NC-SA 4.0"],
-  ["OpenAI Whisper large-v3-turbo, © 2022 OpenAI", "MIT"],
-  ["ivrit-ai/yi-whisper-large-v3-turbo, by ivrit.ai", "Apache 2.0"],
+  ["OpenAI Whisper large-v3-turbo, © 2022 OpenAI (the Whisper-based model)", "MIT"],
+  ["Meta Omnilingual ASR (CTC 1B v2), © 2025 Meta Platforms, Inc. (the Omnilingual-based model)", "Apache 2.0"],
+  ["ivrit-ai/yi-whisper-large-v3-turbo, by ivrit.ai (models up to 2026.11.11)", "Apache 2.0"],
   ["whisper.cpp (speech engine)", "MIT"],
+  ["ONNX Runtime, © Microsoft Corporation (runs the Omnilingual-based model)", "MIT"],
   ["Tauri", "MIT / Apache 2.0"],
   ["React", "MIT"],
   ["shadcn/ui and Radix UI", "MIT"],

@@ -787,7 +787,8 @@ export default function App() {
         onOpenChange={setSettingsOpen}
         shortcut={shortcut}
         onShortcut={setShortcut}
-        model={status?.model ?? null}
+        // Its name with its version ("Omnilingual 2026.11.18-omni"); a model without a name by its version.
+        model={status?.model ? (modelLabel && modelLabel !== status.model ? `${modelLabel} ${status.model}` : status.model) : null}
         appVersion={status?.appVersion}
         entries={entries.length}
         onRollback={rollback}
