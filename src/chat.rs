@@ -450,7 +450,9 @@ pub fn stop_stale() {
                 .output()
         } else {
             // The whole command line: on some systems the short name is cut off.
-            Command::new("ps").args(["-p", pid, "-o", "command="]).output()
+            Command::new("ps")
+                .args(["-p", pid, "-o", "command="])
+                .output()
         };
         let ours = name.is_ok_and(|out| {
             let text = String::from_utf8_lossy(&out.stdout);
