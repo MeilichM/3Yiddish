@@ -102,7 +102,8 @@ export function EntryView({
         {entry.state === "done" && (
           <>
             <p
-              dir="rtl"
+              // Yiddish reads right to left; the English note for an empty take, left to right.
+              dir={entry.text ? "rtl" : "ltr"}
               onClick={copy}
               title="Click to copy"
               className="cursor-pointer px-4 pt-3 pb-1 text-[1.0625rem] leading-relaxed whitespace-pre-wrap select-text"
