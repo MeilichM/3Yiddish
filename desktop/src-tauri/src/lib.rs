@@ -3,6 +3,7 @@
 //! no terminal. Nothing is sent anywhere unless the person says yes to sharing or presses
 //! Send under Contribute (`contribute.rs`).
 mod contribute;
+mod permissions;
 mod pill;
 mod ptt;
 mod talk;
@@ -711,6 +712,11 @@ fn shortcut_set(shortcut: Option<String>, app: AppHandle, core: Shared) -> Out<(
         return Err(e);
     }
     ptt::save(&ptt::Settings { push_to_talk: shortcut.clone() }).map_err(fail)?;
+    // Turning push-to-talk on: ask now for the microphone and the permission to paste
+    // (macOS), not mid-take.
+    if shortcut.is_some() {
+        permissions::ready(true);
+    }
     *core.shortcut_error.lock().map_err(fail)? = None;
     set_tray_tooltip(&app, shortcut.as_deref());
     *core.shortcut.lock().map_err(fail)? = shortcut;
@@ -752,10 +758,55 @@ fn autostart_set(on: bool, app: AppHandle) -> Out<()> {
 
 fn show_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        // macOS: in the Dock only while the window is open (see hide_window).
+        #[cfg(target_os = "macos")]
+        let _ = app.set_dock_visibility(true);
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+/// Close the window but keep running in the tray (the menu bar on macOS), so push-to-talk
+/// goes on working. On macOS the app also leaves the Dock until the window is opened again.
+fn hide_window(window: &tauri::Window) {
+    let _ = window.hide();
+    #[cfg(target_os = "macos")]
+    let _ = window.app_handle().set_dock_visibility(false);
+}
+
+/// The menu bar icon on macOS: the logo's pixel "3Y" alone, as a template image (black on
+/// transparent; macOS draws it white or black to match the bar and the other icons). The
+/// icon is 18 points tall (36 pixels at 2x); like most menu bar icons the drawing is about
+/// 14 points of it, centred: each logo pixel is 4x4, so the 7 rows are 28 pixels, sharp.
+#[cfg(target_os = "macos")]
+fn menu_bar_icon() -> tauri::image::Image<'static> {
+    const ROWS: [&str; 7] = [
+        "####..#...#",
+        "....#.#...#",
+        "....#..#.#.",
+        ".###....#..",
+        "....#...#..",
+        "....#...#..",
+        "####....#..",
+    ];
+    const CELL: usize = 4;
+    const TOP: usize = (36 - 7 * CELL) / 2;
+    let (w, h) = (ROWS[0].len() * CELL, 36);
+    let mut rgba = vec![0u8; w * h * 4];
+    for (r, row) in ROWS.iter().enumerate() {
+        for (c, b) in row.bytes().enumerate() {
+            if b != b'#' {
+                continue;
+            }
+            for y in TOP + r * CELL..TOP + (r + 1) * CELL {
+                for x in c * CELL..(c + 1) * CELL {
+                    rgba[(y * w + x) * 4 + 3] = 255;
+                }
+            }
+        }
+    }
+    tauri::image::Image::new_owned(rgba, w as u32, h as u32)
 }
 
 /// The tray icon: it keeps push-to-talk reachable while the window is closed.
@@ -765,7 +816,9 @@ fn tray(app: &tauri::App) -> tauri::Result<()> {
     let mut builder = TrayIconBuilder::with_id("main")
         .tooltip("3Yiddish")
         .menu(&Menu::with_items(app, &[&open, &quit])?)
-        .show_menu_on_left_click(false)
+        // macOS: a click opens the menu, as with the other menu bar icons. Elsewhere a
+        // left click opens the window and the right click the menu.
+        .show_menu_on_left_click(cfg!(target_os = "macos"))
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => show_window(app),
             "quit" => app.exit(0),
@@ -781,6 +834,11 @@ fn tray(app: &tauri::App) -> tauri::Result<()> {
                 show_window(tray.app_handle());
             }
         });
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.icon(menu_bar_icon()).icon_as_template(true);
+    }
+    #[cfg(not(target_os = "macos"))]
     if let Some(icon) = app.default_window_icon() {
         builder = builder.icon(icon.clone());
     }
@@ -823,6 +881,9 @@ pub fn run() {
             // unless the app was started at sign-in.
             if !std::env::args().any(|a| a == HIDDEN) {
                 show_window(app.handle());
+            } else {
+                #[cfg(target_os = "macos")]
+                let _ = app.handle().set_dock_visibility(false);
             }
             let core = app.state::<Arc<Core>>();
             let saved = ptt::load().push_to_talk;
@@ -841,13 +902,16 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             // With push-to-talk on, closing the window keeps the app in the tray, so the
-            // shortcut goes on working. Quit from the tray icon.
-            if let WindowEvent::CloseRequested { api, .. } = event {
+            // shortcut goes on working. Quit from the tray icon. On macOS closing a window
+            // never quits (it stays in the menu bar); Cmd+Q or the menu's Quit does.
+            if let WindowEvent::CloseRequested { api, .. } = event
+                && window.label() == "main"
+            {
                 let core = window.state::<Arc<Core>>();
                 let listening = core.shortcut.lock().is_ok_and(|s| s.is_some());
-                if listening {
+                if listening || cfg!(target_os = "macos") {
                     api.prevent_close();
-                    let _ = window.hide();
+                    hide_window(window);
                 }
             }
         })
@@ -899,10 +963,25 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building 3Yiddish")
         .run(|_app, event| {
+            // macOS: opening the app again (Finder, Spotlight, Dock) while it runs in the menu
+            // bar brings back its window.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                show_window(_app);
+            }
             // Quitting: shared transcriptions still waiting go now (as the terminal app does).
             if let tauri::RunEvent::Exit = event {
                 contribute::flush();
                 talk::stop();
+                // macOS: AppKit's quit calls exit(), whose C++ static destructors include
+                // ggml-metal's, which aborts when a model is still loaded on the GPU
+                // (GGML_ASSERT rsets count == 0) and shows the "quit unexpectedly" box. A
+                // speech model stays loaded for the app's lifetime (and a worker may hold one),
+                // so leave without the destructors; everything worth keeping is written above.
+                #[cfg(target_os = "macos")]
+                unsafe {
+                    libc::_exit(0)
+                };
             }
         });
 }

@@ -251,6 +251,43 @@ pub fn type_text(text: &str) -> Result<()> {
     type_on_desktop(text)
 }
 
+/// Whether this app may press keys in other apps, which pasting the words needs. Only macOS
+/// asks for it (Privacy & Security > Accessibility); with `ask`, macOS shows its dialog when
+/// the permission is missing. Push-to-talk checks this before recording, so nobody says a
+/// whole sentence only to find it cannot be pasted.
+pub fn can_type(ask: bool) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        #[link(name = "ApplicationServices", kind = "framework")]
+        unsafe extern "C" {
+            fn AXIsProcessTrusted() -> bool;
+        }
+        if unsafe { AXIsProcessTrusted() } {
+            return true;
+        }
+        if ask {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static ASKED: AtomicBool = AtomicBool::new(false);
+            if !ASKED.swap(true, Ordering::SeqCst) {
+                // enigo opens macOS's dialog when it may not type (its default settings),
+                // which also puts the app in the Accessibility list.
+                let _ = enigo::Enigo::new(&enigo::Settings::default());
+            } else {
+                // macOS shows that dialog only once; after that, open the list itself.
+                let _ = std::process::Command::new("open")
+                    .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+                    .spawn();
+            }
+        }
+        false
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = ask;
+        true
+    }
+}
+
 #[cfg(not(target_os = "android"))]
 fn type_on_desktop(text: &str) -> Result<()> {
     use enigo::{Direction, Enigo, Key, Keyboard, Settings};
@@ -266,8 +303,16 @@ fn type_on_desktop(text: &str) -> Result<()> {
     enigo
         .key(modifier, Direction::Press)
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    // macOS: the V key by its key code (kVK_ANSI_V). Key::Unicode('v') looks the key up in
+    // the keyboard layout, which macOS allows only on the main thread; push-to-talk pastes
+    // from a worker thread, and the lookup there killed the app. Cmd + this key is Paste
+    // under any layout, Hebrew/Yiddish included.
+    #[cfg(target_os = "macos")]
+    let v = Key::Other(9);
+    #[cfg(not(target_os = "macos"))]
+    let v = Key::Unicode('v');
     enigo
-        .key(Key::Unicode('v'), Direction::Click)
+        .key(v, Direction::Click)
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     enigo
         .key(modifier, Direction::Release)

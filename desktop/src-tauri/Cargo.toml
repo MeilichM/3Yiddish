@@ -40,6 +40,13 @@ tokio = { version = "1", features = ["time"] }
 [target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
 three-yiddish = { path = "../..", features = ["omni"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# _exit on quit (see the RunEvent::Exit handler in lib.rs).
+libc = "0.2"
+# Asking for the microphone before push-to-talk records (permissions.rs).
+objc2 = "0.6"
+block2 = "0.6"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",

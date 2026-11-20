@@ -108,6 +108,11 @@ fn press(app: &AppHandle, core: &Core) {
     if core.ptt.load(Ordering::SeqCst) {
         return; // the key repeating while held
     }
+    // macOS: without the microphone or the permission to paste, ask for it now and record
+    // nothing, rather than let the person say a sentence that is then lost.
+    if !crate::permissions::ready(true) {
+        return;
+    }
     let Ok(mut slot) = core.recording.lock() else { return };
     if slot.is_some() {
         return; // a take started in the window is going
