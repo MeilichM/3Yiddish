@@ -3,6 +3,7 @@
 //! no terminal. Nothing is sent anywhere unless the person says yes to sharing or presses
 //! Send under Contribute (`contribute.rs`).
 mod contribute;
+mod pill;
 mod ptt;
 mod talk;
 
@@ -13,7 +14,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, Ordering},
     },
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{
     AppHandle, Emitter, Manager, State, WindowEvent,
@@ -473,23 +474,28 @@ fn record_level(core: Shared) -> Level {
 }
 
 #[tauri::command]
-fn record_cancel(core: Shared) {
+fn record_cancel(app: AppHandle, core: Shared) {
     if let Ok(mut slot) = core.recording.lock() {
         *slot = None;
     }
-    core.ptt.store(false, Ordering::SeqCst);
+    if core.ptt.swap(false, Ordering::SeqCst) {
+        pill::hide(&app, Duration::ZERO);
+    }
 }
 
 /// Stop the microphone and keep the take as a WAV file: the voice note.
 #[tauri::command]
-async fn record_stop(core: Shared<'_>) -> Out<Clip> {
+async fn record_stop(app: AppHandle, core: Shared<'_>) -> Out<Clip> {
     let (rec, _) = core
         .recording
         .lock()
         .map_err(fail)?
         .take()
         .ok_or("Not recording")?;
-    core.ptt.store(false, Ordering::SeqCst);
+    // A push-to-talk take stopped from the window: the window transcribes it, not the pill.
+    if core.ptt.swap(false, Ordering::SeqCst) {
+        pill::hide(&app, Duration::ZERO);
+    }
     let core = core.inner().clone();
     tauri::async_runtime::spawn_blocking(move || save_take(&core, rec.stop().map_err(fail)?))
     .await
@@ -830,6 +836,7 @@ pub fn run() {
             // Shared transcriptions that have waited an hour go now.
             contribute::nudge(false);
             talk::start();
+            pill::create(app.handle())?;
             Ok(())
         })
         .on_window_event(|window, event| {

@@ -1,12 +1,12 @@
 //! Push-to-talk: hold a shortcut in any app, speak, let go, and the Yiddish is typed where the
 //! cursor is (and added to the app's history). The shortcut is the person's choice, saved in
 //! state/desktop/settings.json; F9 until they pick another or switch it off.
-use crate::{Clip, Core, Transcript, save_take, transcribe_blocking};
+use crate::{Clip, Core, Transcript, pill, save_take, transcribe_blocking};
 use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
     sync::{Arc, atomic::Ordering},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutEvent, ShortcutState};
@@ -101,6 +101,7 @@ fn cancelled(app: &AppHandle) {
         *slot = None;
     }
     let _ = app.emit("ptt", Event::Cancelled { reason: String::new() });
+    pill::hide(app, Duration::ZERO);
 }
 
 fn press(app: &AppHandle, core: &Core) {
@@ -114,6 +115,7 @@ fn press(app: &AppHandle, core: &Core) {
     *slot = Some((Recorder::start_now(), Instant::now()));
     core.ptt.store(true, Ordering::SeqCst);
     let _ = app.emit("ptt", Event::Recording);
+    pill::show(app);
 }
 
 fn release(app: AppHandle, core: Arc<Core>) {
@@ -132,6 +134,7 @@ fn release(app: AppHandle, core: Arc<Core>) {
             Ok(clip) => clip,
             Err(reason) => {
                 let _ = app.emit("ptt", Event::Cancelled { reason });
+                pill::hide(&app, pill::MESSAGE);
                 return;
             }
         };
@@ -148,10 +151,14 @@ fn release(app: AppHandle, core: Arc<Core>) {
                 let typed = !transcript.text.is_empty()
                     && !here
                     && three_yiddish::dictate::type_text(&transcript.text).is_ok();
+                // Nothing heard: the pill says so for a moment.
+                let after = if transcript.text.is_empty() { pill::MESSAGE } else { Duration::ZERO };
                 let _ = app.emit("ptt", Event::Done { id, transcript, typed });
+                pill::hide(&app, after);
             }
             Err(error) => {
                 let _ = app.emit("ptt", Event::Error { id, error });
+                pill::hide(&app, pill::MESSAGE);
             }
         }
     });

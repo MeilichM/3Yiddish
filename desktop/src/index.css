@@ -162,3 +162,9 @@
     overscroll-behavior: none;
   }
 }
+
+/* The push-to-talk pill's window: only the pill shows, over whatever is behind it. */
+html.pill,
+html.pill body {
+  background: transparent;
+}
