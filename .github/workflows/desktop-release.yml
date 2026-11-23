@@ -71,25 +71,46 @@ jobs:
       - run: npm ci
         working-directory: desktop
       - name: Build
+        if: runner.os != 'Windows'
         shell: bash
         working-directory: desktop
         run: |
           # Released x86 builds target a safe baseline (AVX2, about 2013 on) instead of the
           # build machine's own processor.
-          if [[ "$(uname -m)" == x86_64 || "$RUNNER_OS" == Windows ]]; then
+          if [[ "$(uname -m)" == x86_64 ]]; then
             export GGML_NATIVE=OFF GGML_AVX=ON GGML_AVX2=ON GGML_FMA=ON GGML_F16C=ON
           else
             export GGML_NATIVE=OFF
           fi
           features=
-          if [[ "${{ matrix.vulkan }}" == true ]]; then features="--features vulkan"; fi
-          if [[ "$RUNNER_OS" == Windows ]]; then
-            # A short build folder: the GPU build nests past Windows' 260-character limit.
-            export CARGO_TARGET_DIR='C:\t'
-            powershell -ExecutionPolicy Bypass -File scripts/win-env.ps1 npx tauri build --bundles ${{ matrix.bundles }} $features
-          else
-            npx tauri build --bundles ${{ matrix.bundles }} $features
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            # The Omnilingual runtime was built with a newer compiler and C library than this
+            # system has (same fix as release.yml): the newer C++ library goes inside the
+            # program, and `old-linux` answers the C library names that are missing.
+            sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test >/dev/null
+            for try in 1 2 3 4 5; do
+              sudo apt-get update -qq && sudo apt-get install -y -qq libstdc++-13-dev && break
+              [ "$try" -lt 5 ] && sleep 30
+            done
+            mkdir -p "$RUNNER_TEMP/cxx"
+            echo "INPUT($(ls /usr/lib/gcc/*/13/libstdc++.a))" > "$RUNNER_TEMP/cxx/libstdc++.so"
+            export RUSTFLAGS="-L native=$RUNNER_TEMP/cxx"
+            features="--features old-linux"
           fi
+          npx tauri build --bundles ${{ matrix.bundles }} $features
+      # Windows builds from PowerShell, not Git Bash: Git's /usr/bin/link would shadow MSVC's
+      # link.exe on the PATH.
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: desktop
+        run: |
+          $env:GGML_NATIVE = 'OFF'; $env:GGML_AVX = 'ON'; $env:GGML_AVX2 = 'ON'; $env:GGML_FMA = 'ON'; $env:GGML_F16C = 'ON'
+          # A short build folder: the GPU build nests past Windows' 260-character limit.
+          $env:CARGO_TARGET_DIR = 'C:\t'
+          $features = if ('${{ matrix.vulkan }}' -eq 'true') { '--features vulkan' } else { '' }
+          powershell -ExecutionPolicy Bypass -File scripts\win-env.ps1 npx tauri build --bundles ${{ matrix.bundles }} $features
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Collect installers
         shell: bash
         run: |

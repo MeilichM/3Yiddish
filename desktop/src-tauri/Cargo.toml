@@ -57,6 +57,9 @@ windows-sys = { version = "0.59", features = [
 [features]
 # Graphics card through Vulkan (Windows, Linux). macOS always uses Metal.
 vulkan = ["three-yiddish/vulkan"]
+# Linux release builds: the Omnilingual engine on systems older than its runtime was built for
+# (the core's `old-linux`; see release.yml and desktop-release.yml).
+old-linux = ["three-yiddish/old-linux"]
 
 [profile.release]
 codegen-units = 1
