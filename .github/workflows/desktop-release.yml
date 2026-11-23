@@ -98,13 +98,15 @@ jobs:
             features="--features old-linux"
           fi
           npx tauri build --bundles ${{ matrix.bundles }} $features
-      # Windows builds from PowerShell, not Git Bash: Git's /usr/bin/link would shadow MSVC's
-      # link.exe on the PATH.
+      # Windows builds from PowerShell, and without Git's usr\bin on the PATH: its link.exe
+      # (a coreutils tool) would be picked instead of MSVC's linker.
       - name: Build (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         working-directory: desktop
         run: |
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -and -not (Test-Path (Join-Path $_ 'link.exe')) -or $_ -match 'Microsoft Visual Studio' }) -join ';'
+          Get-Command link.exe -All -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "link.exe on PATH: $($_.Source)" }
           $env:GGML_NATIVE = 'OFF'; $env:GGML_AVX = 'ON'; $env:GGML_AVX2 = 'ON'; $env:GGML_FMA = 'ON'; $env:GGML_F16C = 'ON'
           # A short build folder: the GPU build nests past Windows' 260-character limit.
           $env:CARGO_TARGET_DIR = 'C:\t'
