@@ -1,0 +1,134 @@
+# Tag desktop-vX.Y.Z → the desktop app's installers for Windows, macOS and Linux on a GitHub
+# release. (Plain vX.Y.Z tags are the terminal app's release.yml.)
+# A manual run (workflow_dispatch) builds everything and keeps the installers as run artifacts,
+# but publishes nothing.
+name: Desktop release
+on:
+  push:
+    tags: ["desktop-v*"]
+  workflow_dispatch:
+permissions:
+  contents: write
+env:
+  # Pinned Vulkan SDK for the Windows graphics-card build (same as release.yml).
+  VULKAN_SDK_VERSION: 1.4.313.0
+  VULKAN_SDK_WINDOWS_SHA256: b643ca8ab4aea5c47b9c4e021a0b33b3a13871bf1d8131e162a9e48c257c4694
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows: the graphics-card build (needs any GPU driver, which nearly every PC has)
+          # and a processor-only one for machines where that one does not start.
+          - { os: windows-latest, name: windows-x64, bundles: nsis, vulkan: true }
+          - { os: windows-latest, name: windows-x64-cpu, bundles: nsis }
+          - { os: macos-15, name: macos-apple-silicon, bundles: dmg }
+          - { os: macos-15-intel, name: macos-intel, bundles: dmg }
+          - { os: ubuntu-22.04, name: linux-x64, bundles: "appimage,deb" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Version matches tag
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          v=$(grep -m1 '"version"' desktop/package.json | cut -d'"' -f4)
+          test "desktop-v$v" = "$GITHUB_REF_NAME"
+      - if: runner.os == 'Linux'
+        name: Linux packages (Tauri, sound, whisper.cpp)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libxdo-dev libssl-dev patchelf file libasound2-dev cmake clang
+      - if: matrix.vulkan
+        id: vulkan-sdk
+        uses: actions/cache@v4
+        with:
+          path: C:\VulkanSDK
+          key: vulkan-sdk-windows-${{ env.VULKAN_SDK_VERSION }}
+      - if: matrix.vulkan && steps.vulkan-sdk.outputs.cache-hit != 'true'
+        name: Vulkan SDK (Windows)
+        shell: pwsh
+        run: |
+          $v = $env:VULKAN_SDK_VERSION
+          $f = Join-Path $env:RUNNER_TEMP 'vulkansdk.exe'
+          curl.exe -fsSL --retry 3 -o $f "https://sdk.lunarg.com/sdk/download/$v/windows/vulkansdk-windows-X64-$v.exe"
+          if ((Get-FileHash $f -Algorithm SHA256).Hash.ToLower() -ne $env:VULKAN_SDK_WINDOWS_SHA256) { throw 'Vulkan SDK installer failed its checksum' }
+          $p = Start-Process $f -Wait -PassThru -ArgumentList '--root', "C:\VulkanSDK\$v", '--accept-licenses', '--default-answer', '--confirm-command', 'install'
+          if ($p.ExitCode -ne 0) { throw "Vulkan SDK installer exited with $($p.ExitCode)" }
+      - if: matrix.vulkan
+        shell: pwsh
+        run: |
+          $sdk = "C:\VulkanSDK\$env:VULKAN_SDK_VERSION"
+          if (-not (Test-Path "$sdk\Bin\glslc.exe")) { throw 'Vulkan SDK is incomplete' }
+          "VULKAN_SDK=$sdk" >> $env:GITHUB_ENV
+          "$sdk\Bin" >> $env:GITHUB_PATH
+      - run: rustup toolchain install 1.98.0 --profile minimal && rustup default 1.98.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+        working-directory: desktop
+      - name: Build
+        shell: bash
+        working-directory: desktop
+        run: |
+          # Released x86 builds target a safe baseline (AVX2, about 2013 on) instead of the
+          # build machine's own processor.
+          if [[ "$(uname -m)" == x86_64 || "$RUNNER_OS" == Windows ]]; then
+            export GGML_NATIVE=OFF GGML_AVX=ON GGML_AVX2=ON GGML_FMA=ON GGML_F16C=ON
+          else
+            export GGML_NATIVE=OFF
+          fi
+          features=
+          if [[ "${{ matrix.vulkan }}" == true ]]; then features="--features vulkan"; fi
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            # A short build folder: the GPU build nests past Windows' 260-character limit.
+            export CARGO_TARGET_DIR='C:\t'
+            powershell -ExecutionPolicy Bypass -File scripts/win-env.ps1 npx tauri build --bundles ${{ matrix.bundles }} $features
+          else
+            npx tauri build --bundles ${{ matrix.bundles }} $features
+          fi
+      - name: Collect installers
+        shell: bash
+        run: |
+          mkdir -p out
+          v=$(grep -m1 '"version"' desktop/package.json | cut -d'"' -f4)
+          for dir in /c/t/release/bundle desktop/src-tauri/target/release/bundle; do
+            [ -d "$dir" ] || continue
+            find "$dir" -maxdepth 2 -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' \) |
+              while read -r f; do
+                ext="${f##*.}"
+                case "${{ matrix.name }}" in
+                  windows-x64) to="3Yiddish-Desktop-windows-x64-setup.exe" ;;
+                  windows-x64-cpu) to="3Yiddish-Desktop-windows-x64-cpu-setup.exe" ;;
+                  *) to="3Yiddish-Desktop-${{ matrix.name }}.$ext" ;;
+                esac
+                cp "$f" "out/$to"
+              done
+          done
+          ls -la out
+          test -n "$(ls out)"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-${{ matrix.name }}
+          path: out/*
+  release:
+    needs: build
+    # Only a tag makes a release (a draft, published by hand); a manual run stops after the builds.
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${GITHUB_REF_NAME#desktop-v}"
+          gh release create "$GITHUB_REF_NAME" dist/* --title "3Yiddish Desktop $v" \
+            --notes-file .github/desktop-release-notes.md --draft

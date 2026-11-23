@@ -1,115 +1,157 @@
 <p align="center"><img src="assets/readme/logo.png" alt="3Yiddish" width="392"></p>
 
-# 3Yiddish
+# 3Yiddish Desktop
 
-**You talk Yiddish. It types Yiddish.** On your own computer, for free, no account,
-no cloud, no nonsense. Yes, it knows loshn koydesh. Mostly. It's learning. Be nice.
+**You talk Yiddish. It types Yiddish.** In a proper window on your own computer, for free,
+no account, no cloud, no nonsense. Yes, it knows loshn koydesh. Mostly. It's learning. Be nice.
 
-**[How good is it? See the benchmark.](BENCHMARK.md)**
+This is the desktop app for [3Yiddish](https://github.com/TripleU613/3Yiddish), TripleU613's
+Yiddish speech-to-text. Same speech models, same engine, in a normal app with a mic button
+instead of a terminal. **[How good is it? See the benchmark.](BENCHMARK.md)**
 
-![The app: you talk, Yiddish appears](assets/readme/chat.png)
+![3Yiddish Desktop: talk, and the Yiddish appears](assets/readme/desktop-transcribe-dark.png)
 
-## Get it (one line, we promise)
+## Get it
 
-**Linux / Mac:** open a terminal, paste, hit Enter:
+| Your computer | Download |
+| --- | --- |
+| **Windows** (10 or 11) | [3Yiddish-Desktop-windows-x64-setup.exe](https://github.com/MeilichM/3Yiddish/releases/latest/download/3Yiddish-Desktop-windows-x64-setup.exe) |
+| **Mac** with Apple chip (M1 and newer) | [3Yiddish-Desktop-macos-apple-silicon.dmg](https://github.com/MeilichM/3Yiddish/releases/latest/download/3Yiddish-Desktop-macos-apple-silicon.dmg) |
+| **Mac** with Intel chip | [3Yiddish-Desktop-macos-intel.dmg](https://github.com/MeilichM/3Yiddish/releases/latest/download/3Yiddish-Desktop-macos-intel.dmg) |
+| **Linux** (any) | [3Yiddish-Desktop-linux-x64.AppImage](https://github.com/MeilichM/3Yiddish/releases/latest/download/3Yiddish-Desktop-linux-x64.AppImage) |
+| **Linux** (Ubuntu, Debian, Mint) | [3Yiddish-Desktop-linux-x64.deb](https://github.com/MeilichM/3Yiddish/releases/latest/download/3Yiddish-Desktop-linux-x64.deb) |
+
+Everything else (checksums, older versions) is on the [releases page](https://github.com/MeilichM/3Yiddish/releases).
+
+The first time you open it, it asks whether to download the speech model (about 575 MB,
+one time; go make a coffee) and shows the download as it goes.
+
+<details>
+<summary><b>Windows</b> says "Windows protected your PC"?</summary>
+
+The app isn't signed with a paid certificate (yet), so Windows doesn't know it. Click
+**More info**, then **Run anyway**.
+
+The download uses your graphics card, which is about ten times faster. If the app doesn't
+open at all after installing, your computer probably has no graphics driver. Install the
+[processor-only version](https://github.com/MeilichM/3Yiddish/releases/latest/download/3Yiddish-Desktop-windows-x64-cpu-setup.exe)
+instead.
+</details>
+
+<details>
+<summary><b>Mac</b> says it "can't be opened" or "Apple could not verify" it?</summary>
+
+Same story: no paid Apple certificate. Open the `.dmg`, drag **3Yiddish** into
+**Applications**, and open it once. When the Mac refuses, go to **System Settings →
+Privacy & Security**, scroll down, and click **Open Anyway** next to 3Yiddish. You only do
+this once.
+
+If it says the app "is damaged", it isn't. Open **Terminal** and paste:
 
 ```sh
-curl -fsSL https://github.com/TripleU613/3Yiddish/releases/latest/download/install.sh | sh
+xattr -dr com.apple.quarantine /Applications/3Yiddish.app
 ```
 
-**Windows:** open PowerShell, paste, hit Enter:
+Macs always use the Apple graphics chip; nothing to pick.
+</details>
 
-```powershell
-irm https://github.com/TripleU613/3Yiddish/releases/latest/download/install.ps1 | iex
-```
+<details>
+<summary><b>Linux</b>: AppImage or .deb?</summary>
 
-That's it. It installs in seconds. The first time you open it, it asks whether to
-download the speech model (about 575 MB, one time; go make a coffee) and shows the
-download as it goes.
+- **AppImage**: works on most distributions. Make it runnable and open it:
+  `chmod +x 3Yiddish-Desktop-linux-x64.AppImage && ./3Yiddish-Desktop-linux-x64.AppImage`
+- **.deb**: Ubuntu, Debian, Mint and friends. `sudo apt install ./3Yiddish-Desktop-linux-x64.deb`,
+  then find 3Yiddish in your apps menu.
 
-**Two models, one button.** Both are our own, trained on heimish Yiddish: one built on
-OpenAI's Whisper, one built on Meta's Omnilingual. They make different mistakes, so if one
-gets a recording wrong, click the model button at the top and try the other. The second
-one is downloaded only when you ask for it (about 1 GB). The
-Whisper-based one is the default and can use a graphics card; the Omnilingual-based one
-runs on the processor.
-
-Got a graphics card? The installer notices and gives you the GPU build, which is about ten
-times faster. A little GPU/CPU button on top shows which one is running; click it to switch.
-On an Android phone it works inside Termux too. It needs the Termux:API app (from the same
-place you got Termux) for the microphone, and the installer tells you if it is missing. Tap
-the **arrow** at the top once so the Yiddish letters are drawn properly; Termux's own font stretches
-them. (To undo: `rm ~/.termux/font.ttf; termux-reload-settings`.)
+The Linux build runs on the processor.
+</details>
 
 ## Use it
 
-```sh
-3yiddish
-```
-
-Click the mic. Say something. Click stop. Watch the Yiddish appear, then click it to copy.
-Or hold **Space** to talk and let go to send.
-Your recording stays in the chat as a voice note, so you can play yourself back.
-
-
-![Recording: the bar is your voice](assets/readme/recording.png)
+Click the mic, or hold **Space**. Say something. Let go. The Yiddish appears; click it to
+copy. Your recording stays above it as a voice note, so you can play yourself back.
 
 Got a recording already? Click **+**, drag the file in, or paste it with Ctrl+V.
 
-Rather stay in the terminal?
+<p align="center"><img src="assets/readme/desktop-transcribe-light.png" alt="The same screen in light mode" width="640"></p>
 
-```sh
-3yiddish transcribe shiur.mp3
-```
+Light, dark, or whatever your computer uses: the sun/moon button at the top.
 
-**Type Yiddish anywhere (push-to-talk).** Run `3yiddish dictate`, then hold **F9** in any app
-(email, WhatsApp, Word, a forum), speak, and let go: the Yiddish is typed right where your cursor
-is. Pick another key with `3yiddish dictate --key CapsLock`. On Linux, add a keyboard shortcut in
-your desktop settings; `3yiddish dictate` prints the exact line to paste.
+**Two models, one button.** Both are trained on heimish Yiddish: one built on OpenAI's
+Whisper, one built on Meta's Omnilingual. They make different mistakes, so if one gets a
+recording wrong, pick the other from the **Model** button at the top, or use **Transcribe
+again with…** on that recording. The second one is downloaded only when you ask for it.
+The **CPU/GPU** button shows whether your graphics card is doing the work; click it to switch.
 
-**Talk to it (chat).** Click the speech bubble at the top. The first time, it asks whether to
-download chat (about 6.4 GB, once). Then talk or type, in Yiddish or English, and it answers
-in Yiddish. It runs on your computer like everything else: a thinking model (Gemma, by Google)
-answers, and our own translator, trained on heimish Yiddish, turns it into the Yiddish people
-actually write. It is new and it makes mistakes, so don't take its word on halacha. Phones
-don't get chat yet.
+### Type Yiddish anywhere (push-to-talk)
 
-One more thing:
-- **Local API.** `3yiddish serve`, then point any OpenAI-style transcription tool at
-  `http://127.0.0.1:8793`. If that sentence meant nothing to you, ignore it.
+Hold **F9** in any program (email, WhatsApp, Word, a forum), speak, and let go: the Yiddish
+is typed right where your cursor is. A little pill shows while it listens. Pick another key
+or combination in **Settings** (the gear), or switch it off there. While push-to-talk is on,
+closing the window keeps 3Yiddish in the tray (on a Mac, the menu bar) so the key keeps
+working. **Start with Windows** / **Open at login** starts it there when you sign in.
+Push-to-talk is made for Windows and Mac; on Linux it may not work on every desktop yet.
 
-## Updates? Automatic-ish
+On a Mac, the first press asks for the microphone and for permission to type into other
+apps. Say yes to both.
 
-When there's a new version or a smarter model, the Refresh button turns into an arrow. Click it. Done.
-Every model is run on our test before it ships, and the numbers go in the
-[benchmark](BENCHMARK.md), good or bad.
-Don't like the new one? `3yiddish model rollback`.
+![Settings: push-to-talk, models, history](assets/readme/desktop-settings-dark.png)
+
+### Talk to it (Chat)
+
+Click **Chat** at the top. The first time, it asks whether to download chat (about 6.4 GB,
+once). Then talk or type, in Yiddish or English, and it answers in Yiddish. It runs on your
+computer like everything else: a thinking model (Gemma, by Google) works out the answer, and
+a translator trained on heimish Yiddish writes it the way people actually write. With a
+graphics card an answer takes a few seconds; on the processor alone it can take a minute.
+It's new and it makes mistakes, so don't take its word on halacha.
+
+![Chat: ask in English or Yiddish, it answers in Yiddish](assets/readme/desktop-chat-dark.png)
 
 ## Help it get better
 
-Want to help? Click **CONTRIBUTE**. Say a few things in your own words, fix the words the
-app got wrong, and press **Send**. No account, no setup; any name will do. Real voices with
-real corrections are how the test gets honest and the model gets better.
+Click **Contribute**. Say a few things in your own words (it suggests ideas if you're stuck),
+fix the words the app got wrong, and press **Send**. No account; any name will do. Real
+voices with real corrections are how the test gets honest and the models get better.
 
-![Contribute: fix the words it got wrong](assets/readme/review.png)
+<p align="center"><img src="assets/readme/desktop-contribute-light.png" alt="Contribute: say it, fix what it heard, send" width="640"></p>
 
 ## Is my stuff private?
 
 Yes. It all runs on your computer, and your voice stays there unless you say otherwise:
 
-- The first time you open the app it asks whether to share what you transcribe. The
-  answer is **No** unless you pick Yes.
-- **CONTRIBUTE** tells you what it sends before you accept, and accepting it turns
-  sharing on too. Sharing only sends what you transcribe after it is on, never anything
-  from before.
-- Changed your mind? Click **CONTRIBUTE**, then **Sharing is on**, or run `3yiddish share off`. That
-  also deletes anything still waiting to be sent.
+- **Contribute** in Settings is **off** unless you turn it on. Off means nothing leaves your
+  computer.
+- Turned on, it sends what you transcribe *from then on* (the recordings, their text and a
+  few technical facts like versions, GPU or CPU, timings), never anything from before. No
+  name and no computer id. They are kept privately and used to test, and maybe later to
+  improve, Yiddish speech to text.
+- **History** in Settings shows how many recordings the app keeps, and **Clear** deletes them.
 
-Shared recordings go with their text and a few technical facts (versions, GPU or CPU,
-timings, errors). No name and no computer id. They are kept privately and used to test,
-and maybe later to improve, Yiddish speech to text.
+If you never turn it on, the only thing it asks the internet is "got a newer model?"
 
-If you never say yes, the only thing it asks the internet is "got any updates?"
+## Prefer the terminal?
+
+The original 3Yiddish is a terminal app (plus a local API, and it runs on Android in
+Termux). It lives in [TripleU613's repository](https://github.com/TripleU613/3Yiddish),
+with its own one-line installer. Both apps share their data folder, so a model downloaded by
+one is used by the other.
+
+## Build it yourself
+
+See [desktop/README.md](desktop/README.md). The short version: Rust, Node.js 20+, CMake and
+a C++ compiler, then `cd desktop && npm install && npm run tauri build`.
+
+## About this repository
+
+This is a fork of [TripleU613/3Yiddish](https://github.com/TripleU613/3Yiddish).
+
+- **`main`**: the desktop app, built on top of 3Yiddish. Releases are tagged `desktop-vX.Y.Z`.
+- **`upstream`**: TripleU613's `main`, commit for commit. Their updates are brought into
+  `main` from there.
+
+The speech models, the engine and almost everything that makes it understand Yiddish are
+TripleU613's work. The desktop app is built on top.
 
 ## Rules (the short version)
 
