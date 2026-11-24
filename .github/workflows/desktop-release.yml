@@ -19,12 +19,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Windows: the graphics-card build (needs any GPU driver, which nearly every PC has)
-          # and a processor-only one for machines where that one does not start.
+          # Windows: one build with the graphics card (Vulkan). On a PC without a graphics
+          # driver it opens all the same and runs on the processor (src/no_vulkan.rs).
           - { os: windows-latest, name: windows-x64, bundles: nsis, vulkan: true }
-          - { os: windows-latest, name: windows-x64-cpu, bundles: nsis }
+          # Macs with an Apple chip only; Intel Macs are not released.
           - { os: macos-15, name: macos-apple-silicon, bundles: dmg }
-          - { os: macos-15-intel, name: macos-intel, bundles: dmg }
           - { os: ubuntu-22.04, name: linux-x64, bundles: "appimage,deb" }
     runs-on: ${{ matrix.os }}
     steps:
@@ -125,7 +124,6 @@ jobs:
                 ext="${f##*.}"
                 case "${{ matrix.name }}" in
                   windows-x64) to="3Yiddish-Desktop-windows-x64-setup.exe" ;;
-                  windows-x64-cpu) to="3Yiddish-Desktop-windows-x64-cpu-setup.exe" ;;
                   *) to="3Yiddish-Desktop-${{ matrix.name }}.$ext" ;;
                 esac
                 cp "$f" "out/$to"

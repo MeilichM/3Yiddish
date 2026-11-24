@@ -5,10 +5,8 @@ The 3Yiddish desktop app: talk Yiddish, get Yiddish text, on your own computer. 
 
 | Computer | File |
 | --- | --- |
-| Windows | `3Yiddish-Desktop-windows-x64-setup.exe` (uses the graphics card) |
-| Windows, if that one doesn't open | `3Yiddish-Desktop-windows-x64-cpu-setup.exe` |
+| Windows | `3Yiddish-Desktop-windows-x64-setup.exe` |
 | Mac, Apple chip (M1 and newer) | `3Yiddish-Desktop-macos-apple-silicon.dmg` |
-| Mac, Intel | `3Yiddish-Desktop-macos-intel.dmg` |
 | Linux | `3Yiddish-Desktop-linux-x64.AppImage`, or the `.deb` for Ubuntu/Debian/Mint |
 
 The apps are not signed with a paid certificate yet, so Windows and macOS warn the first time.

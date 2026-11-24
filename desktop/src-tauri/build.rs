@@ -19,7 +19,19 @@ fn main() {
         );
     }
     link_clang_runtime();
+    delay_load_vulkan();
     tauri_build::build()
+}
+
+/// The Windows graphics-card build loads `vulkan-1.dll` (which comes with the graphics driver)
+/// on first use, not when the program starts. A computer without a driver then still opens
+/// the app, and it runs on the CPU (src/no_vulkan.rs).
+fn delay_load_vulkan() {
+    let windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
+    if windows && std::env::var_os("CARGO_FEATURE_VULKAN").is_some() {
+        println!("cargo:rustc-link-arg-bins=/DELAYLOAD:vulkan-1.dll");
+        println!("cargo:rustc-link-arg-bins=delayimp.lib");
+    }
 }
 
 /// whisper.cpp's Metal code asks at runtime whether the Mac has macOS 15 (`@available`).

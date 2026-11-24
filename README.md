@@ -17,7 +17,6 @@ instead of a terminal, and a fully implemented push-to-talk setup.
 | --- | --- |
 | **Windows** (10 or 11) | [3Yiddish-Desktop-windows-x64-setup.exe](https://github.com/MeilichM/3Yiddish/releases/latest/download/3Yiddish-Desktop-windows-x64-setup.exe) |
 | **Mac** with Apple chip (M1 and newer) | [3Yiddish-Desktop-macos-apple-silicon.dmg](https://github.com/MeilichM/3Yiddish/releases/latest/download/3Yiddish-Desktop-macos-apple-silicon.dmg) |
-| **Mac** with Intel chip | [3Yiddish-Desktop-macos-intel.dmg](https://github.com/MeilichM/3Yiddish/releases/latest/download/3Yiddish-Desktop-macos-intel.dmg) |
 | **Linux** (any) | [3Yiddish-Desktop-linux-x64.AppImage](https://github.com/MeilichM/3Yiddish/releases/latest/download/3Yiddish-Desktop-linux-x64.AppImage) |
 | **Linux** (Ubuntu, Debian, Mint) | [3Yiddish-Desktop-linux-x64.deb](https://github.com/MeilichM/3Yiddish/releases/latest/download/3Yiddish-Desktop-linux-x64.deb) |
 
@@ -32,10 +31,8 @@ one time; go make a coffee) and shows the download as it goes.
 The app isn't signed with a paid certificate (yet), so Windows doesn't know it. Click
 **More info**, then **Run anyway**.
 
-The download uses your graphics card, which is about ten times faster. If the app doesn't
-open at all after installing, your computer probably has no graphics driver. Install the
-[processor-only version](https://github.com/MeilichM/3Yiddish/releases/latest/download/3Yiddish-Desktop-windows-x64-cpu-setup.exe)
-instead.
+The app uses your graphics card when it has one, which is about ten times faster. Without one
+it runs on the processor (GPU is greyed out in the CPU/GPU menu).
 </details>
 
 <details>
