@@ -1,15 +1,15 @@
-<p align="center"><img src="assets/readme/logo.png" alt="3Yiddish" width="392"></p>
+![3Yiddish Desktop: talk, and the Yiddish appears](assets/readme/desktop-transcribe-dark.png)
 
 # 3Yiddish Desktop
 
-**You talk Yiddish. It types Yiddish.** In a proper window on your own computer, for free,
-no account, no cloud, no nonsense. Yes, it knows loshn koydesh. Mostly. It's learning. Be nice.
+**You talk Yiddish. It types Yiddish.** In a proper window, fully private on your own computer, for free, no account, no cloud, no nonsense.
 
 This is the desktop app for [3Yiddish](https://github.com/TripleU613/3Yiddish), TripleU613's
-Yiddish speech-to-text. Same speech models, same engine, in a normal app with a mic button
-instead of a terminal. **[How good is it? See the benchmark.](BENCHMARK.md)**
+Yiddish speech-to-text. Same speech models and engine, in a normal app with a mic button
+instead of a terminal, and a fully implemented push-to-talk setup.
 
-![3Yiddish Desktop: talk, and the Yiddish appears](assets/readme/desktop-transcribe-dark.png)
+**[How good is it? See the benchmark.](BENCHMARK.md)**
+
 
 ## Get it
 
@@ -68,8 +68,7 @@ The Linux build runs on the processor.
 
 ## Use it
 
-Click the mic, or hold **Space**. Say something. Let go. The Yiddish appears; click it to
-copy. Your recording stays above it as a voice note, so you can play yourself back.
+Click the mic, or hold **Space**, and say something. Let go. The Yiddish appears. Your recording stays above it as a voice note, so you can play yourself back.
 
 Got a recording already? Click **+**, drag the file in, or paste it with Ctrl+V.
 
