@@ -22,15 +22,15 @@ jobs:
           # Windows: one build with the graphics card (Vulkan). On a PC without a graphics
           # driver it opens all the same and runs on the processor (src/no_vulkan.rs).
           - { os: windows-latest, name: windows-x64, bundles: nsis, vulkan: true }
-          # Macs with an Apple chip only; Intel Macs are not released. macos-14, not 15: GitHub's
-          # macos-15 Apple-chip machines were too scarce to start a job (Nov 2026).
-          - { os: macos-14, name: macos-apple-silicon, bundles: dmg }
+          # Macs with an Apple chip only; Intel Macs are not released. macos-26, not 15: GitHub's
+          # macos-15 Apple-chip machines were too scarce to start a job (Nov 2026); macos-14 is retired.
+          - { os: macos-26, name: macos-apple-silicon, bundles: dmg }
           - { os: ubuntu-22.04, name: linux-x64, bundles: "appimage,deb" }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      # whisper.cpp's Metal code needs a macOS 15 SDK, which macos-14's default Xcode may lack.
-      - if: matrix.os == 'macos-14'
+      # whisper.cpp's Metal code needs a recent macOS SDK: use the newest Xcode on the machine.
+      - if: runner.os == 'macOS'
         name: Newest Xcode
         run: |
           xc=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
